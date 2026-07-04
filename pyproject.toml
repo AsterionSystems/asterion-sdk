@@ -1,0 +1,27 @@
+[project]
+name = "asterion-sdk"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["asterion-ccsds"]
+
+[tool.uv.sources]
+asterion-ccsds = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11",
+]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

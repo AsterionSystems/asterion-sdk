@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asterion-ccsds"
+version = "0.1.0"
+description = "Typed CCSDS Space Packet encoding and decoding"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Asterion Systems" }]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asterion"]
