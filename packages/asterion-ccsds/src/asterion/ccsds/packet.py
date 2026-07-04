@@ -123,6 +123,30 @@ class SpacePacket:
     header: SpacePacketHeader
     data: bytes
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        apid: int,
+        packet_type: PacketType,
+        sequence_count: int,
+        data: bytes,
+        version: int = 0,
+        secondary_header_flag: bool = False,
+        sequence_flags: SequenceFlags = SequenceFlags.UNSEGMENTED,
+    ) -> Self:
+        """Create a packet and derive its primary header from packet data."""
+        header = SpacePacketHeader(
+            version=version,
+            packet_type=packet_type,
+            secondary_header_flag=secondary_header_flag,
+            apid=apid,
+            sequence_flags=sequence_flags,
+            sequence_count=sequence_count,
+            packet_data_length=len(data) - 1,
+        )
+        return cls(header=header, data=data)
+
     def __post_init__(self) -> None:
         if not isinstance(self.header, SpacePacketHeader):
             raise PacketValidationError("header must be a SpacePacketHeader")
@@ -163,7 +187,4 @@ class SpacePacket:
                 "packet data length mismatch: "
                 f"header declares {expected_data_length} bytes, got {len(packet_data)}"
             )
-        try:
-            return cls(header=header, data=packet_data)
-        except PacketValidationError as error:
-            raise PacketDecodeError(f"invalid Space Packet: {error}") from error
+        return cls(header=header, data=packet_data)

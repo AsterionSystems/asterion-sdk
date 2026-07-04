@@ -30,6 +30,18 @@ header = SpacePacketHeader(
 encoded = SpacePacket(header=header, data=data).to_bytes()
 ```
 
+For the common case, `SpacePacket.create()` derives the header and packet length:
+
+```python
+packet = SpacePacket.create(
+    apid=42,
+    packet_type=PacketType.TELEMETRY,
+    sequence_count=15,
+    data=b"Hello",
+)
+encoded = packet.to_bytes()
+```
+
 ## Decoding
 
 ```python

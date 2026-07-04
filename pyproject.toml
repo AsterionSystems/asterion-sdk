@@ -9,7 +9,10 @@ asterion-ccsds = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.31",
+    "pre-commit>=4.0",
     "pytest>=8.0",
+    "pytest-cov>=6.0",
     "ruff>=0.11",
 ]
 
@@ -19,9 +22,28 @@ members = ["packages/*"]
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 
+[tool.coverage.run]
+branch = true
+source = ["asterion.ccsds"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "SIM", "UP"]
+# The formatter may intentionally produce long lines. E501 would conflict with it.
+ignore = ["E501"]
+
+[tool.basedpyright]
+include = ["packages/asterion-ccsds/src", "packages/asterion-ccsds/tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "none"
+# Public models retain runtime guards for callers that do not use a type checker.
+reportUnnecessaryIsInstance = "none"
