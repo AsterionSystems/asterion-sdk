@@ -8,9 +8,10 @@ version = "0.1.0"
 description = "Typed CCSDS Space Packet encoding and decoding"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "Apache-2.0"
 authors = [{ name = "Asterion Systems" }]
 dependencies = []
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/asterion"]
+only-include = ["src/asterion/ccsds"]
+sources = ["src"]
