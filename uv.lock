@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "asterion-ccsds",
+    "asterion-mdb",
     "asterion-sdk",
 ]
 
@@ -14,11 +15,17 @@ version = "0.1.0"
 source = { editable = "packages/asterion-ccsds" }
 
 [[package]]
+name = "asterion-mdb"
+version = "0.1.0"
+source = { editable = "packages/asterion-mdb" }
+
+[[package]]
 name = "asterion-sdk"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "asterion-ccsds" },
+    { name = "asterion-mdb" },
 ]
 
 [package.dev-dependencies]
@@ -32,7 +39,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "asterion-ccsds", editable = "packages/asterion-ccsds" }]
+requires-dist = [
+    { name = "asterion-ccsds", editable = "packages/asterion-ccsds" },
+    { name = "asterion-mdb", editable = "packages/asterion-mdb" },
+]
 
 [package.metadata.requires-dev]
 dev = [

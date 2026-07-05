@@ -1,4 +1,4 @@
-"""Verify the asterion-ccsds wheel layout and core metadata."""
+"""Verify an Asterion namespace-package wheel layout and core metadata."""
 
 from __future__ import annotations
 
@@ -9,22 +9,30 @@ from zipfile import ZipFile
 
 
 def verify_wheel(wheel_path: Path) -> None:
+    distributions = {
+        "asterion_ccsds": ("asterion-ccsds", "ccsds"),
+        "asterion_mdb": ("asterion-mdb", "mdb"),
+    }
+    distribution_key = next(
+        (key for key in distributions if wheel_path.name.startswith(key + "-")), None
+    )
+    assert distribution_key is not None, f"unsupported wheel: {wheel_path.name}"
+    project_name, package_name = distributions[distribution_key]
+    dist_info = f"{distribution_key}-0.1.0.dist-info"
     with ZipFile(wheel_path) as wheel:
         names = set(wheel.namelist())
         unexpected = {
             name
             for name in names
-            if not name.startswith(
-                ("asterion/ccsds/", "asterion_ccsds-0.1.0.dist-info/")
-            )
+            if not name.startswith((f"asterion/{package_name}/", f"{dist_info}/"))
         }
         assert not unexpected, f"unexpected wheel entries: {sorted(unexpected)}"
         assert "asterion/__init__.py" not in names
-        assert "asterion/ccsds/py.typed" in names
+        assert f"asterion/{package_name}/py.typed" in names
 
-        metadata_path = "asterion_ccsds-0.1.0.dist-info/METADATA"
+        metadata_path = f"{dist_info}/METADATA"
         metadata = BytesParser().parsebytes(wheel.read(metadata_path))
-        assert metadata["Name"] == "asterion-ccsds"
+        assert metadata["Name"] == project_name
         assert metadata["Version"] == "0.1.0"
         assert metadata["Requires-Python"] == ">=3.12"
         assert metadata["License-Expression"] == "Apache-2.0"

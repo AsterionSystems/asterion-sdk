@@ -5,9 +5,9 @@ systems packages. Packages share the PEP 420 `asterion` namespace, so consumers
 can install only what they need while using consistent imports such as
 `asterion.ccsds` and, in the future, `asterion.pus`.
 
-The repository currently contains `asterion-ccsds`, a typed, dependency-free
-implementation of the CCSDS Space Packet primary header and basic packet
-encoding and decoding.
+The repository contains `asterion-ccsds`, a typed CCSDS Space Packet
+implementation, and `asterion-mdb`, a protocol-neutral mission database and
+telemetry decoder. Both packages have dependency-free runtimes.
 
 ## Repository layout
 
