@@ -134,6 +134,45 @@ Counter instances contain only in-memory state. They are not global, persistent,
 or thread-safe; applications sharing an instance across threads must synchronize
 access.
 
+## Segmentation and reassembly
+
+Large application data can be divided into Space Packets while preserving the
+per-APID sequence count:
+
+```python
+packets = counter.create_packets(
+    apid=42,
+    packet_type=PacketType.TELEMETRY,
+    data=large_data,
+    max_data_length=1024,
+)
+```
+
+Data that fits produces one unsegmented packet. Larger data receives the CCSDS
+first, continuation, and last sequence flags. Generic segmentation rejects
+secondary headers because their content and per-segment construction are
+mission-specific.
+
+Reassembly requires an explicit memory bound:
+
+```python
+from asterion.ccsds import SpacePacketReassembler
+
+reassembler = SpacePacketReassembler(
+    max_assembly_length=16 * 1024 * 1024,
+    max_active_assemblies=64,
+)
+for packet in packets:
+    if (result := reassembler.push(packet)) is not None:
+        process(result.data)
+```
+
+Assemblies are tracked per APID and require continuous modulo-16384 sequence
+counts. An invalid segment discards only its APID's partial assembly and raises
+`ReassemblyError`; other APIDs remain usable. This behavior is a bounded library
+convenience over the sequence flags in CCSDS 133.0-B-2 §4.1.3.4.2, not a
+mission-specific secondary-header or PUS reassembly policy.
+
 APID 2047 is reserved for idle packets. The package exports `IDLE_APID` and
 provides `packet.is_idle` and `packet.header.is_idle` for identification without
 imposing mission-specific idle-data rules.

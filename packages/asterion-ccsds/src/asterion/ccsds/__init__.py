@@ -17,6 +17,11 @@ from .packet import (
     SpacePacket,
     SpacePacketHeader,
 )
+from .reassembly import (
+    ReassembledPacketData,
+    ReassemblyError,
+    SpacePacketReassembler,
+)
 from .sequence import SequenceCounter
 from .stream import (
     DecoderStateError,
@@ -40,10 +45,13 @@ __all__ = [
     "PacketDecodeError",
     "PacketType",
     "PacketValidationError",
+    "ReassembledPacketData",
+    "ReassemblyError",
     "SequenceCounter",
     "SequenceFlags",
     "SpacePacket",
     "SpacePacketDecoder",
     "SpacePacketHeader",
+    "SpacePacketReassembler",
     "decode_packets",
 ]

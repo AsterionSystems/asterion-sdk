@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from ._buffer import ByteBufferError, copy_bytes
 from .packet import (
     MAX_APID,
+    MAX_PACKET_DATA_LENGTH,
     MAX_SEQUENCE_COUNT,
     SPACE_PACKET_VERSION,
     BytesLike,
@@ -109,3 +111,66 @@ class SequenceCounter:
         )
         self._next_values[normalized_apid] = (sequence_count + 1) % _SEQUENCE_MODULUS
         return packet
+
+    def create_packets(
+        self,
+        *,
+        apid: int,
+        packet_type: PacketType,
+        data: BytesLike,
+        max_data_length: int = MAX_PACKET_DATA_LENGTH,
+        version: int = SPACE_PACKET_VERSION,
+        secondary_header_flag: bool = False,
+    ) -> list[SpacePacket]:
+        """Create one or more packets, segmenting data when necessary.
+
+        All packets are validated before the APID's sequence state advances.
+        Secondary headers are intentionally unsupported because this generic
+        helper cannot recreate a mission-specific header for every segment.
+        """
+        normalized_apid = _normalize_apid(apid)
+        normalized_type = _normalize_packet_type(packet_type)
+        normalized_maximum = _validate_integer(
+            "max_data_length", max_data_length, 1, MAX_PACKET_DATA_LENGTH
+        )
+        if not isinstance(secondary_header_flag, bool):
+            raise PacketValidationError("secondary_header_flag must be a bool")
+        if secondary_header_flag:
+            raise PacketValidationError(
+                "secondary_header_flag must be False for generic segmentation"
+            )
+        try:
+            normalized_data = copy_bytes(data)
+        except ByteBufferError as error:
+            raise PacketValidationError(f"data {error}") from error
+        if not normalized_data:
+            raise PacketValidationError("packet data must contain at least one byte")
+
+        chunks = [
+            normalized_data[offset : offset + normalized_maximum]
+            for offset in range(0, len(normalized_data), normalized_maximum)
+        ]
+        if len(chunks) == 1:
+            flags = [SequenceFlags.UNSEGMENTED]
+        else:
+            flags = [SequenceFlags.FIRST_SEGMENT]
+            flags.extend(SequenceFlags.CONTINUATION for _ in chunks[1:-1])
+            flags.append(SequenceFlags.LAST_SEGMENT)
+
+        first_count = self._next_values.get(normalized_apid, self._initial_value)
+        packets = [
+            SpacePacket.create(
+                apid=normalized_apid,
+                packet_type=normalized_type,
+                sequence_count=(first_count + index) % _SEQUENCE_MODULUS,
+                data=chunk,
+                version=version,
+                secondary_header_flag=False,
+                sequence_flags=flag,
+            )
+            for index, (chunk, flag) in enumerate(zip(chunks, flags, strict=True))
+        ]
+        self._next_values[normalized_apid] = (
+            first_count + len(packets)
+        ) % _SEQUENCE_MODULUS
+        return packets
