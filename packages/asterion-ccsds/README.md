@@ -4,6 +4,13 @@
 Space Packet primary header, together with basic whole-packet encoding and
 decoding. It uses network byte order and has no runtime dependencies.
 
+Additional reference material:
+
+- [API guide](https://github.com/AsterionSystems/asterion-sdk/blob/main/packages/asterion-ccsds/API.md)
+- [CCSDS conformance](https://github.com/AsterionSystems/asterion-sdk/blob/main/packages/asterion-ccsds/CONFORMANCE.md)
+- [Compatibility policy](https://github.com/AsterionSystems/asterion-sdk/blob/main/packages/asterion-ccsds/COMPATIBILITY.md)
+- [Changelog](https://github.com/AsterionSystems/asterion-sdk/blob/main/packages/asterion-ccsds/CHANGELOG.md)
+
 ## Installation
 
 Package publication is not configured yet. Once published, installation will be:

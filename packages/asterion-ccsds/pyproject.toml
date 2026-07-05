@@ -9,8 +9,23 @@ description = "Typed CCSDS Space Packet encoding and decoding"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Asterion Systems" }]
+keywords = ["ccsds", "space", "telemetry", "telecommand"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/AsterionSystems/asterion-sdk"
+Issues = "https://github.com/AsterionSystems/asterion-sdk/issues"
 
 [tool.hatch.build.targets.wheel]
 only-include = ["src/asterion/ccsds"]

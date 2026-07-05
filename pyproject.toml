@@ -10,6 +10,7 @@ asterion-ccsds = { workspace = true }
 [dependency-groups]
 dev = [
     "basedpyright>=1.31",
+    "hypothesis>=6.130",
     "pre-commit>=4.0",
     "pytest>=8.0",
     "pytest-cov>=6.0",
