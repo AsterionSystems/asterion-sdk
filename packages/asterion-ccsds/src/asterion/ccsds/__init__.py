@@ -22,6 +22,14 @@ from .reassembly import (
     ReassemblyError,
     SpacePacketReassembler,
 )
+from .secondary import (
+    DecodedPacketData,
+    SecondaryHeaderCodec,
+    SecondaryHeaderError,
+    create_packet_with_secondary_header,
+    decode_packet_data,
+    encode_packet_data,
+)
 from .sequence import SequenceCounter
 from .stream import (
     DecoderStateError,
@@ -40,6 +48,7 @@ __all__ = [
     "SPACE_PACKET_VERSION",
     "BytesLike",
     "CcsdsError",
+    "DecodedPacketData",
     "DecoderStateError",
     "IncompletePacketError",
     "PacketDecodeError",
@@ -47,11 +56,16 @@ __all__ = [
     "PacketValidationError",
     "ReassembledPacketData",
     "ReassemblyError",
+    "SecondaryHeaderCodec",
+    "SecondaryHeaderError",
     "SequenceCounter",
     "SequenceFlags",
     "SpacePacket",
     "SpacePacketDecoder",
     "SpacePacketHeader",
     "SpacePacketReassembler",
+    "create_packet_with_secondary_header",
+    "decode_packet_data",
     "decode_packets",
+    "encode_packet_data",
 ]

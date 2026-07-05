@@ -173,6 +173,32 @@ counts. An invalid segment discards only its APID's partial assembly and raises
 convenience over the sequence flags in CCSDS 133.0-B-2 §4.1.3.4.2, not a
 mission-specific secondary-header or PUS reassembly policy.
 
+## Secondary-header codecs
+
+CCSDS defines where a secondary header appears but leaves its format to the
+mission. The package provides a typed codec boundary without a global registry or
+knowledge of PUS:
+
+```python
+packet = create_packet_with_secondary_header(
+    apid=42,
+    packet_type=PacketType.TELEMETRY,
+    sequence_count=9,
+    secondary_header=my_header,
+    user_data=b"payload",
+    codec=my_codec,
+)
+
+decoded = decode_packet_data(packet, codec=my_codec)
+process(decoded.secondary_header, decoded.user_data)
+```
+
+A `SecondaryHeaderCodec[T]` encodes `T` to one or more bytes and decodes it from
+a read-only `memoryview`, returning `(header, consumed_byte_count)`. This lets a
+future `asterion-pus` package supply its own codec while depending on
+`asterion-ccsds`; the CCSDS package never imports PUS or stores global codec
+state.
+
 APID 2047 is reserved for idle packets. The package exports `IDLE_APID` and
 provides `packet.is_idle` and `packet.header.is_idle` for identification without
 imposing mission-specific idle-data rules.
