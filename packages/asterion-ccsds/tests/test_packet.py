@@ -1,5 +1,12 @@
 import pytest
 from asterion.ccsds import (
+    IDLE_APID,
+    MAX_APID,
+    MAX_PACKET_DATA_LENGTH,
+    MAX_PACKET_LENGTH,
+    MAX_SEQUENCE_COUNT,
+    PRIMARY_HEADER_SIZE,
+    SPACE_PACKET_VERSION,
     PacketDecodeError,
     PacketType,
     PacketValidationError,
@@ -175,3 +182,127 @@ def test_packet_rejects_data_larger_than_length_field() -> None:
 def test_packet_decode_rejects_short_packet() -> None:
     with pytest.raises(PacketDecodeError, match="at least 6"):
         SpacePacket.from_bytes(b"short")
+
+
+def test_public_protocol_constants() -> None:
+    assert SPACE_PACKET_VERSION == 0
+    assert PRIMARY_HEADER_SIZE == 6
+    assert MAX_APID == IDLE_APID == 2_047
+    assert MAX_SEQUENCE_COUNT == 16_383
+    assert MAX_PACKET_DATA_LENGTH == 65_536
+    assert MAX_PACKET_LENGTH == 65_542
+
+
+def test_header_convenience_api() -> None:
+    header = make_header(apid=IDLE_APID)
+
+    assert header.data_length == 3
+    assert header.total_length == 9
+    assert header.is_idle is True
+    assert bytes(header) == header.to_bytes()
+
+
+def test_packet_convenience_api() -> None:
+    packet = SpacePacket(header=make_header(), data=b"abc")
+
+    assert packet.data_length == 3
+    assert packet.total_length == 9
+    assert packet.is_idle is False
+    assert bytes(packet) == packet.to_bytes()
+    assert len(packet) == packet.total_length == len(bytes(packet))
+
+
+def test_packet_normalizes_bytearray_and_defensively_copies() -> None:
+    source = bytearray(b"abc")
+    packet = SpacePacket(header=make_header(), data=source)
+
+    source[0] = ord("z")
+
+    assert packet.data == b"abc"
+    assert isinstance(packet.data, bytes)
+
+
+def test_create_normalizes_memoryview_and_defensively_copies() -> None:
+    source = bytearray(b"abc")
+    packet = SpacePacket.create(
+        apid=42,
+        packet_type=PacketType.TELEMETRY,
+        sequence_count=1,
+        data=memoryview(source),
+    )
+
+    source[0] = ord("z")
+
+    assert packet.data == b"abc"
+    assert isinstance(packet.data, bytes)
+
+
+def test_decode_accepts_bytearray_and_memoryview() -> None:
+    encoded = SpacePacket(header=make_header(), data=b"abc").to_bytes()
+
+    assert SpacePacketHeader.from_bytes(bytearray(encoded[:6])) == make_header()
+    assert SpacePacket.from_bytes(memoryview(encoded)).data == b"abc"
+
+
+def test_minimum_packet_golden_vector() -> None:
+    header = make_header(
+        apid=0,
+        sequence_flags=SequenceFlags.CONTINUATION,
+        sequence_count=0,
+        packet_data_length=0,
+    )
+    packet = SpacePacket(header=header, data=b"\x00")
+
+    assert packet.to_bytes() == bytes.fromhex("00000000000000")
+
+
+def test_maximum_header_fields_golden_vector() -> None:
+    header = SpacePacketHeader(
+        version=SPACE_PACKET_VERSION,
+        packet_type=PacketType.TELECOMMAND,
+        secondary_header_flag=True,
+        apid=MAX_APID,
+        sequence_flags=SequenceFlags.UNSEGMENTED,
+        sequence_count=MAX_SEQUENCE_COUNT,
+        packet_data_length=MAX_PACKET_DATA_LENGTH - 1,
+    )
+
+    assert header.to_bytes() == bytes.fromhex("1fffffffffff")
+    assert header.data_length == MAX_PACKET_DATA_LENGTH
+    assert header.total_length == MAX_PACKET_LENGTH
+
+
+def test_maximum_packet_size() -> None:
+    packet = SpacePacket.create(
+        apid=MAX_APID,
+        packet_type=PacketType.TELEMETRY,
+        sequence_count=MAX_SEQUENCE_COUNT,
+        data=b"x" * MAX_PACKET_DATA_LENGTH,
+    )
+
+    assert len(packet) == MAX_PACKET_LENGTH
+    assert packet.is_idle is True
+
+
+def test_construction_rejects_unsupported_or_released_buffers() -> None:
+    with pytest.raises(PacketValidationError, match="bytes, bytearray, or memoryview"):
+        SpacePacket(header=make_header(), data=object())  # type: ignore[arg-type]
+
+    released = memoryview(b"abc")
+    released.release()
+    with pytest.raises(PacketValidationError, match="not a usable byte buffer"):
+        SpacePacket(header=make_header(), data=released)
+
+
+def test_decoding_rejects_unsupported_or_released_buffers() -> None:
+    with pytest.raises(PacketDecodeError, match="bytes, bytearray, or memoryview"):
+        SpacePacket.from_bytes(object())  # type: ignore[arg-type]
+    with pytest.raises(PacketDecodeError, match="bytes, bytearray, or memoryview"):
+        SpacePacketHeader.from_bytes(object())  # type: ignore[arg-type]
+
+    released = memoryview(b"abc")
+    released.release()
+    with pytest.raises(PacketDecodeError, match="not a usable byte buffer"):
+        SpacePacket.from_bytes(released)
+    with pytest.raises(PacketDecodeError, match="not a usable byte buffer"):
+        SpacePacketHeader.from_bytes(released)

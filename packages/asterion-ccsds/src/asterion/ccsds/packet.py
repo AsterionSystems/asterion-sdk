@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Self
 
+type BytesLike = bytes | bytearray | memoryview
+
+SPACE_PACKET_VERSION = 0
 PRIMARY_HEADER_SIZE = 6
-_MAX_PACKET_DATA_LENGTH = 65_536
+MAX_APID = 2_047
+IDLE_APID = MAX_APID
+MAX_SEQUENCE_COUNT = 16_383
+MAX_PACKET_DATA_LENGTH = 65_536
+MAX_PACKET_LENGTH = PRIMARY_HEADER_SIZE + MAX_PACKET_DATA_LENGTH
 
 
 class CcsdsError(Exception):
@@ -47,6 +54,36 @@ def _validate_integer(name: str, value: object, minimum: int, maximum: int) -> N
         )
 
 
+def _normalize_packet_data(data: object) -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise PacketValidationError("data must be bytes, bytearray, or memoryview")
+    try:
+        if isinstance(data, bytes):
+            return data
+        if isinstance(data, bytearray):
+            return bytes(data)
+        return data.tobytes()
+    except (BufferError, OverflowError, TypeError, ValueError) as error:
+        raise PacketValidationError(
+            f"data is not a usable byte buffer: {error}"
+        ) from error
+
+
+def _decode_buffer(data: object, *, name: str) -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise PacketDecodeError(f"{name} must be bytes, bytearray, or memoryview")
+    try:
+        if isinstance(data, bytes):
+            return data
+        if isinstance(data, bytearray):
+            return bytes(data)
+        return data.tobytes()
+    except (BufferError, OverflowError, TypeError, ValueError) as error:
+        raise PacketDecodeError(
+            f"{name} is not a usable byte buffer: {error}"
+        ) from error
+
+
 @dataclass(frozen=True, slots=True)
 class SpacePacketHeader:
     """The six-byte CCSDS Space Packet primary header.
@@ -64,17 +101,40 @@ class SpacePacketHeader:
     packet_data_length: int
 
     def __post_init__(self) -> None:
-        _validate_integer("version", self.version, 0, 0)
+        _validate_integer(
+            "version", self.version, SPACE_PACKET_VERSION, SPACE_PACKET_VERSION
+        )
         _validate_integer("packet_type", self.packet_type, 0, 1)
         if not isinstance(self.secondary_header_flag, bool):
             raise PacketValidationError("secondary_header_flag must be a bool")
-        _validate_integer("apid", self.apid, 0, 2_047)
+        _validate_integer("apid", self.apid, 0, MAX_APID)
         _validate_integer("sequence_flags", self.sequence_flags, 0, 3)
-        _validate_integer("sequence_count", self.sequence_count, 0, 16_383)
-        _validate_integer("packet_data_length", self.packet_data_length, 0, 65_535)
+        _validate_integer("sequence_count", self.sequence_count, 0, MAX_SEQUENCE_COUNT)
+        _validate_integer(
+            "packet_data_length", self.packet_data_length, 0, MAX_PACKET_DATA_LENGTH - 1
+        )
 
         object.__setattr__(self, "packet_type", PacketType(self.packet_type))
         object.__setattr__(self, "sequence_flags", SequenceFlags(self.sequence_flags))
+
+    @property
+    def data_length(self) -> int:
+        """Number of packet data bytes declared by this header."""
+        return self.packet_data_length + 1
+
+    @property
+    def total_length(self) -> int:
+        """Complete packet length implied by this header."""
+        return PRIMARY_HEADER_SIZE + self.data_length
+
+    @property
+    def is_idle(self) -> bool:
+        """Whether this header uses the reserved idle-packet APID."""
+        return self.apid == IDLE_APID
+
+    def __bytes__(self) -> bytes:
+        """Encode the primary header."""
+        return self.to_bytes()
 
     def to_bytes(self) -> bytes:
         """Encode the primary header in big-endian network byte order."""
@@ -94,7 +154,7 @@ class SpacePacketHeader:
     @classmethod
     def from_bytes(cls, data: bytes | bytearray | memoryview) -> Self:
         """Decode exactly six bytes as a CCSDS primary header."""
-        raw = bytes(data)
+        raw = _decode_buffer(data, name="primary header")
         if len(raw) != PRIMARY_HEADER_SIZE:
             raise PacketDecodeError(
                 f"primary header must be {PRIMARY_HEADER_SIZE} bytes, got {len(raw)}"
@@ -116,12 +176,18 @@ class SpacePacketHeader:
             raise PacketDecodeError(f"invalid primary header: {error}") from error
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class SpacePacket:
     """A CCSDS Space Packet consisting of a primary header and packet data."""
 
     header: SpacePacketHeader
     data: bytes
+
+    def __init__(self, header: SpacePacketHeader, data: BytesLike) -> None:
+        """Initialize a packet, normalizing packet data to immutable bytes."""
+        object.__setattr__(self, "header", header)
+        object.__setattr__(self, "data", _normalize_packet_data(data))
+        self.__post_init__()
 
     @classmethod
     def create(
@@ -130,12 +196,13 @@ class SpacePacket:
         apid: int,
         packet_type: PacketType,
         sequence_count: int,
-        data: bytes,
-        version: int = 0,
+        data: BytesLike,
+        version: int = SPACE_PACKET_VERSION,
         secondary_header_flag: bool = False,
         sequence_flags: SequenceFlags = SequenceFlags.UNSEGMENTED,
     ) -> Self:
         """Create a packet and derive its primary header from packet data."""
+        normalized_data = _normalize_packet_data(data)
         header = SpacePacketHeader(
             version=version,
             packet_type=packet_type,
@@ -143,20 +210,18 @@ class SpacePacket:
             apid=apid,
             sequence_flags=sequence_flags,
             sequence_count=sequence_count,
-            packet_data_length=len(data) - 1,
+            packet_data_length=len(normalized_data) - 1,
         )
-        return cls(header=header, data=data)
+        return cls(header=header, data=normalized_data)
 
     def __post_init__(self) -> None:
         if not isinstance(self.header, SpacePacketHeader):
             raise PacketValidationError("header must be a SpacePacketHeader")
-        if not isinstance(self.data, bytes):
-            raise PacketValidationError("data must be bytes")
         if not self.data:
             raise PacketValidationError("packet data must contain at least one byte")
-        if len(self.data) > _MAX_PACKET_DATA_LENGTH:
+        if len(self.data) > MAX_PACKET_DATA_LENGTH:
             raise PacketValidationError(
-                f"packet data must not exceed {_MAX_PACKET_DATA_LENGTH} bytes"
+                f"packet data must not exceed {MAX_PACKET_DATA_LENGTH} bytes"
             )
         expected_length_field = len(self.data) - 1
         if self.header.packet_data_length != expected_length_field:
@@ -166,6 +231,29 @@ class SpacePacket:
                 f"{self.header.packet_data_length}"
             )
 
+    @property
+    def data_length(self) -> int:
+        """Number of bytes in the packet data field."""
+        return len(self.data)
+
+    @property
+    def total_length(self) -> int:
+        """Complete serialized packet length."""
+        return PRIMARY_HEADER_SIZE + self.data_length
+
+    @property
+    def is_idle(self) -> bool:
+        """Whether this packet uses the reserved idle-packet APID."""
+        return self.header.is_idle
+
+    def __bytes__(self) -> bytes:
+        """Encode the complete Space Packet."""
+        return self.to_bytes()
+
+    def __len__(self) -> int:
+        """Return the complete serialized packet length."""
+        return self.total_length
+
     def to_bytes(self) -> bytes:
         """Encode the complete Space Packet."""
         return self.header.to_bytes() + self.data
@@ -173,7 +261,7 @@ class SpacePacket:
     @classmethod
     def from_bytes(cls, data: bytes | bytearray | memoryview) -> Self:
         """Decode one complete Space Packet from bytes."""
-        raw = bytes(data)
+        raw = _decode_buffer(data, name="Space Packet")
         if len(raw) < PRIMARY_HEADER_SIZE:
             raise PacketDecodeError(
                 f"Space Packet must contain at least {PRIMARY_HEADER_SIZE} header bytes"
@@ -181,7 +269,7 @@ class SpacePacket:
 
         header = SpacePacketHeader.from_bytes(raw[:PRIMARY_HEADER_SIZE])
         packet_data = raw[PRIMARY_HEADER_SIZE:]
-        expected_data_length = header.packet_data_length + 1
+        expected_data_length = header.data_length
         if len(packet_data) != expected_data_length:
             raise PacketDecodeError(
                 "packet data length mismatch: "
