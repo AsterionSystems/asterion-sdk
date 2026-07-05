@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Self
 
+from ._buffer import ByteBufferError, copy_bytes
+
 type BytesLike = bytes | bytearray | memoryview
 
 SPACE_PACKET_VERSION = 0
@@ -55,33 +57,17 @@ def _validate_integer(name: str, value: object, minimum: int, maximum: int) -> N
 
 
 def _normalize_packet_data(data: object) -> bytes:
-    if not isinstance(data, (bytes, bytearray, memoryview)):
-        raise PacketValidationError("data must be bytes, bytearray, or memoryview")
     try:
-        if isinstance(data, bytes):
-            return data
-        if isinstance(data, bytearray):
-            return bytes(data)
-        return data.tobytes()
-    except (BufferError, OverflowError, TypeError, ValueError) as error:
-        raise PacketValidationError(
-            f"data is not a usable byte buffer: {error}"
-        ) from error
+        return copy_bytes(data)
+    except ByteBufferError as error:
+        raise PacketValidationError(f"data {error}") from error
 
 
 def _decode_buffer(data: object, *, name: str) -> bytes:
-    if not isinstance(data, (bytes, bytearray, memoryview)):
-        raise PacketDecodeError(f"{name} must be bytes, bytearray, or memoryview")
     try:
-        if isinstance(data, bytes):
-            return data
-        if isinstance(data, bytearray):
-            return bytes(data)
-        return data.tobytes()
-    except (BufferError, OverflowError, TypeError, ValueError) as error:
-        raise PacketDecodeError(
-            f"{name} is not a usable byte buffer: {error}"
-        ) from error
+        return copy_bytes(data)
+    except ByteBufferError as error:
+        raise PacketDecodeError(f"{name} {error}") from error
 
 
 @dataclass(frozen=True, slots=True)

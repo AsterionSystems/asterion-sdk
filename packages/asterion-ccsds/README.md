@@ -74,6 +74,39 @@ packet = SpacePacket.from_bytes(encoded)
 print(packet.header.apid, packet.data)
 ```
 
+## Decoding packet streams
+
+Use `SpacePacketDecoder` when packets arrive in arbitrary chunks. Complete
+packets are returned immediately, while a trailing partial packet is retained:
+
+```python
+from asterion.ccsds import SpacePacketDecoder
+
+decoder = SpacePacketDecoder()
+for chunk in source:
+    for packet in decoder.feed(chunk):
+        process(packet)
+
+decoder.finish()  # Raises IncompletePacketError if trailing bytes remain.
+```
+
+Several complete packets can be decoded from one buffer with the strict helper:
+
+```python
+from asterion.ccsds import decode_packets
+
+packets = decode_packets(buffer)
+```
+
+The decoder accepts packets up to the CCSDS maximum by default. A smaller
+mission-specific limit can be supplied with `max_packet_length`. Invalid headers
+and size violations put the decoder into a failed state; its diagnostic
+`buffered_data` is preserved until `reset()` is called.
+
+The decoder deliberately does not scan for a new packet after malformed data.
+Raw Space Packets have no synchronization marker, so reliable resynchronization
+requires an external framing layer.
+
 APID 2047 is reserved for idle packets. The package exports `IDLE_APID` and
 provides `packet.is_idle` and `packet.header.is_idle` for identification without
 imposing mission-specific idle-data rules.
@@ -83,5 +116,5 @@ imposing mission-specific idle-data rules.
 - Only the CCSDS Space Packet primary header and complete packet framing are
   implemented.
 - Secondary headers are treated as opaque packet data.
-- ECSS PUS, AIT tooling, checksums, streams, and segmented-packet reassembly are
-  not implemented.
+- ECSS PUS, AIT tooling, checksums, transport I/O, and segmented-packet
+  reassembly are not implemented.

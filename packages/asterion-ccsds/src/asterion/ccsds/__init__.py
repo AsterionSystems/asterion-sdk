@@ -17,6 +17,12 @@ from .packet import (
     SpacePacket,
     SpacePacketHeader,
 )
+from .stream import (
+    DecoderStateError,
+    IncompletePacketError,
+    SpacePacketDecoder,
+    decode_packets,
+)
 
 __all__ = [
     "IDLE_APID",
@@ -28,10 +34,14 @@ __all__ = [
     "SPACE_PACKET_VERSION",
     "BytesLike",
     "CcsdsError",
+    "DecoderStateError",
+    "IncompletePacketError",
     "PacketDecodeError",
     "PacketType",
     "PacketValidationError",
     "SequenceFlags",
     "SpacePacket",
+    "SpacePacketDecoder",
     "SpacePacketHeader",
+    "decode_packets",
 ]
