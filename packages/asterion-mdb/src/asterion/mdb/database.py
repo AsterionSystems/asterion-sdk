@@ -4,32 +4,43 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from math import isfinite
 from types import MappingProxyType
 
 from .decoder import BytesLike, decode_parameter, immutable_values, normalize_bytes
 from .errors import (
+    AlarmEvaluationError,
     AmbiguousContainerError,
+    CalibrationError,
+    CalibrationSelectionError,
     MdbDecodeError,
     MdbValidationError,
     NoMatchingContainerError,
     ReferenceResolutionError,
+    ValidityEvaluationError,
 )
 from .model import (
+    AlarmSeverity,
     BinaryParameterType,
     BooleanParameterType,
     ByteOrder,
     Comparison,
     ComparisonOperator,
+    ContextCalibrator,
+    ContextReference,
     DecodedContainer,
     EnumeratedParameterType,
     EnumeratedValue,
+    EnumerationAlarm,
     FloatParameterType,
     IntegerParameterType,
+    NumericAlarmRange,
     ParameterDefinition,
     ParameterEntry,
     ParameterReference,
     ParameterType,
     ParameterValue,
+    PolynomialCalibrator,
     QualifiedName,
     Scalar,
     SequenceContainer,
@@ -122,6 +133,7 @@ class MissionDatabaseBuilder:
             name: self._validate_type(value) for name, value in self._types.items()
         }
         parameters, aliases = self._resolve_parameters(types)
+        types = self._resolve_type_evaluation(types, parameters)
         containers = self._resolve_containers(parameters)
         self._validate_container_cycles(containers)
         derived: dict[QualifiedName, list[QualifiedName]] = {}
@@ -184,6 +196,7 @@ class MissionDatabaseBuilder:
                     raise MdbValidationError(
                         f"{value.name} has duplicate enumeration values"
                     )
+                MissionDatabaseBuilder._validate_enumeration_alarms(value)
         elif isinstance(value, FloatParameterType):
             if value.size_bits not in (32, 64):
                 raise MdbValidationError(f"{value.name} float size must be 32 or 64")
@@ -196,7 +209,92 @@ class MissionDatabaseBuilder:
                 raise MdbValidationError(
                     f"{value.name} strip_padding must not be empty"
                 )
+        if isinstance(value, (IntegerParameterType, FloatParameterType)):
+            MissionDatabaseBuilder._validate_numeric_evaluation(value)
         return value
+
+    @staticmethod
+    def _validate_numeric_evaluation(
+        value: IntegerParameterType | FloatParameterType,
+    ) -> None:
+        if value.calibrator is not None:
+            MissionDatabaseBuilder._validate_calibrator(value.name, value.calibrator)
+        for contextual in value.contextual_calibrators:
+            if not isinstance(contextual, ContextCalibrator) or not contextual.criteria:
+                raise MdbValidationError(
+                    f"{value.name} contextual calibrators require criteria"
+                )
+            MissionDatabaseBuilder._validate_calibrator(
+                value.name, contextual.calibrator
+            )
+        for alarm in value.alarm_ranges:
+            if not isinstance(alarm, NumericAlarmRange):
+                raise MdbValidationError(f"{value.name} has an invalid alarm range")
+            if not isinstance(alarm.severity, AlarmSeverity):
+                raise MdbValidationError(f"{value.name} has an invalid alarm severity")
+            if alarm.minimum is None and alarm.maximum is None:
+                raise MdbValidationError(f"{value.name} alarm range needs a bound")
+            bounds = (alarm.minimum, alarm.maximum)
+            if any(
+                isinstance(bound, bool)
+                or not isinstance(bound, (int, float))
+                or (isinstance(bound, float) and not isfinite(bound))
+                for bound in bounds
+                if bound is not None
+            ):
+                raise MdbValidationError(f"{value.name} alarm bounds must be numeric")
+            if not isinstance(alarm.minimum_inclusive, bool) or not isinstance(
+                alarm.maximum_inclusive, bool
+            ):
+                raise MdbValidationError(
+                    f"{value.name} alarm inclusivity flags must be boolean"
+                )
+            if (
+                alarm.minimum is not None
+                and alarm.maximum is not None
+                and (
+                    alarm.minimum > alarm.maximum
+                    or (
+                        alarm.minimum == alarm.maximum
+                        and not (alarm.minimum_inclusive and alarm.maximum_inclusive)
+                    )
+                )
+            ):
+                raise MdbValidationError(f"{value.name} has an empty alarm range")
+
+    @staticmethod
+    def _validate_calibrator(
+        name: QualifiedName, calibrator: PolynomialCalibrator
+    ) -> None:
+        if not isinstance(calibrator, PolynomialCalibrator):
+            raise MdbValidationError(f"{name} calibrator must be polynomial")
+        if any(
+            isinstance(coefficient, bool)
+            or not isinstance(coefficient, (int, float))
+            or (isinstance(coefficient, float) and not isfinite(coefficient))
+            for coefficient in calibrator.coefficients
+        ):
+            raise MdbValidationError(
+                f"{name} calibrator coefficients must be finite numbers"
+            )
+
+    @staticmethod
+    def _validate_enumeration_alarms(value: EnumeratedParameterType) -> None:
+        raw_values: list[int] = []
+        for alarm in value.alarms:
+            if not isinstance(alarm, EnumerationAlarm):
+                raise MdbValidationError(
+                    f"{value.name} has an invalid enumeration alarm"
+                )
+            if isinstance(alarm.raw_value, bool) or not isinstance(
+                alarm.raw_value, int
+            ):
+                raise MdbValidationError(f"{value.name} alarm values must be integers")
+            if not isinstance(alarm.severity, AlarmSeverity):
+                raise MdbValidationError(f"{value.name} has an invalid alarm severity")
+            raw_values.append(alarm.raw_value)
+        if len(raw_values) != len(set(raw_values)):
+            raise MdbValidationError(f"{value.name} has duplicate enumeration alarms")
 
     def _resolve_parameters(
         self, types: Mapping[QualifiedName, ParameterType]
@@ -213,6 +311,70 @@ class MissionDatabaseBuilder:
                 aliases[alias] = parameter.name
             resolved[parameter.name] = replace(parameter, type_ref=type_name)
         return resolved, aliases
+
+    def _resolve_type_evaluation(
+        self,
+        types: Mapping[QualifiedName, ParameterType],
+        parameters: Mapping[QualifiedName, ParameterDefinition],
+    ) -> dict[QualifiedName, ParameterType]:
+        resolved: dict[QualifiedName, ParameterType] = {}
+        for name, parameter_type in types.items():
+            owner = _owner(name)
+            validity = self._resolve_comparisons(
+                parameter_type.validity_criteria,
+                owner=owner,
+                parameters=parameters,
+            )
+            changes: dict[str, object] = {"validity_criteria": validity}
+            if isinstance(parameter_type, (IntegerParameterType, FloatParameterType)):
+                contextual = tuple(
+                    replace(
+                        item,
+                        criteria=self._resolve_comparisons(
+                            item.criteria,
+                            owner=owner,
+                            parameters=parameters,
+                        ),
+                    )
+                    for item in parameter_type.contextual_calibrators
+                )
+                changes["contextual_calibrators"] = contextual
+            resolved[name] = replace(parameter_type, **changes)
+        return resolved
+
+    @staticmethod
+    def _resolve_comparisons(
+        comparisons: tuple[Comparison, ...],
+        *,
+        owner: QualifiedName,
+        parameters: Mapping[QualifiedName, ParameterDefinition],
+    ) -> tuple[Comparison, ...]:
+        resolved: list[Comparison] = []
+        for comparison in comparisons:
+            if not isinstance(comparison, Comparison):
+                raise MdbValidationError("criteria must contain Comparison values")
+            if not isinstance(comparison.operator, ComparisonOperator):
+                raise MdbValidationError("comparison operator is invalid")
+            if not isinstance(comparison.right, (int, float, bool, str, bytes)):
+                raise MdbValidationError("comparison literal is invalid")
+            if isinstance(comparison.left, ParameterReference):
+                parameter_name = _resolve_reference(
+                    comparison.left.reference,
+                    owner=owner,
+                    definitions=parameters,
+                )
+                comparison = replace(
+                    comparison, left=ParameterReference(parameter_name)
+                )
+            elif isinstance(comparison.left, ContextReference):
+                if not comparison.left.name:
+                    raise MdbValidationError(
+                        "context reference names must not be empty"
+                    )
+            else:
+                raise MdbValidationError("comparison left side is invalid")
+            resolved.append(comparison)
+        return tuple(resolved)
 
     def _resolve_containers(
         self, parameters: Mapping[QualifiedName, ParameterDefinition]
@@ -334,6 +496,7 @@ class MissionDatabase:
             raise MdbDecodeError(f"unknown root container {root_name}")
         values: dict[QualifiedName, ParameterValue] = {}
         ordered: list[ParameterValue] = []
+        context_values = context or {}
         cursor = 0
         consumed = 0
 
@@ -346,11 +509,16 @@ class MissionDatabase:
             current = QualifiedName.parse(base) if base is not None else None
         for container in reversed(ancestry):
             cursor, consumed = self._decode_entries(
-                container, raw, cursor, consumed, values, ordered
+                container,
+                raw,
+                cursor,
+                consumed,
+                values,
+                ordered,
+                context_values,
             )
 
         selected = self.containers[root_name]
-        context_values = context or {}
         while children := self.derived_containers.get(selected.name):
             matches = [
                 self.containers[name]
@@ -368,7 +536,13 @@ class MissionDatabase:
                 )
             selected = matches[0]
             cursor, consumed = self._decode_entries(
-                selected, raw, cursor, consumed, values, ordered
+                selected,
+                raw,
+                cursor,
+                consumed,
+                values,
+                ordered,
+                context_values,
             )
         return DecodedContainer(
             container=selected,
@@ -385,6 +559,7 @@ class MissionDatabase:
         consumed: int,
         values: dict[QualifiedName, ParameterValue],
         ordered: list[ParameterValue],
+        context: Mapping[str, Scalar],
     ) -> tuple[int, int]:
         for entry in container.entries:
             if entry.bit_offset is not None:
@@ -415,10 +590,97 @@ class MissionDatabase:
                 parameter=parameter,
                 parameter_type=parameter_type,
             )
+            decoded = self._evaluate_parameter(decoded, parameter_type, values, context)
             values[parameter.name] = decoded
             ordered.append(decoded)
             consumed = max(consumed, cursor)
         return cursor, consumed
+
+    @classmethod
+    def _evaluate_parameter(
+        cls,
+        decoded: ParameterValue,
+        parameter_type: ParameterType,
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+    ) -> ParameterValue:
+        engineering = decoded.value
+        if isinstance(parameter_type, (IntegerParameterType, FloatParameterType)):
+            try:
+                matches = [
+                    item
+                    for item in parameter_type.contextual_calibrators
+                    if cls._matches_comparisons(item.criteria, values, context)
+                ]
+            except MdbDecodeError as error:
+                raise CalibrationSelectionError(
+                    f"cannot select a calibrator for {decoded.parameter.name}: {error}"
+                ) from error
+            if len(matches) > 1:
+                raise CalibrationSelectionError(
+                    f"multiple contextual calibrators match {decoded.parameter.name}"
+                )
+            calibrator = matches[0].calibrator if matches else parameter_type.calibrator
+            if calibrator is not None:
+                try:
+                    raw = decoded.raw_value
+                    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                        raise TypeError("raw value is not numeric")
+                    engineering = calibrator.calibrate(raw)
+                except (ArithmeticError, TypeError, ValueError) as error:
+                    raise CalibrationError(
+                        f"cannot calibrate parameter {decoded.parameter.name}: {error}"
+                    ) from error
+
+        try:
+            is_valid = cls._matches_comparisons(
+                parameter_type.validity_criteria, values, context
+            )
+        except MdbDecodeError as error:
+            raise ValidityEvaluationError(
+                f"cannot evaluate validity for {decoded.parameter.name}: {error}"
+            ) from error
+
+        severity = None
+        if is_valid:
+            try:
+                severity = cls._alarm_severity(parameter_type, engineering, decoded)
+            except (TypeError, ValueError) as error:
+                raise AlarmEvaluationError(
+                    f"cannot evaluate alarms for {decoded.parameter.name}: {error}"
+                ) from error
+        return replace(
+            decoded,
+            value=engineering,
+            is_valid=is_valid,
+            alarm_severity=severity,
+        )
+
+    @staticmethod
+    def _alarm_severity(
+        parameter_type: ParameterType,
+        engineering: object,
+        decoded: ParameterValue,
+    ) -> AlarmSeverity | None:
+        if isinstance(parameter_type, (IntegerParameterType, FloatParameterType)):
+            if isinstance(engineering, bool) or not isinstance(
+                engineering, (int, float)
+            ):
+                raise TypeError("engineering value is not numeric")
+            matches = (
+                alarm.severity
+                for alarm in parameter_type.alarm_ranges
+                if _in_alarm_range(engineering, alarm)
+            )
+            return max(matches, default=None)
+        if isinstance(parameter_type, EnumeratedParameterType):
+            raw = decoded.raw_value
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise TypeError("enumerated raw value is not an integer")
+            return dict(
+                (alarm.raw_value, alarm.severity) for alarm in parameter_type.alarms
+            ).get(raw)
+        return None
 
     @staticmethod
     def _matches(
@@ -426,7 +688,17 @@ class MissionDatabase:
         values: Mapping[QualifiedName, ParameterValue],
         context: Mapping[str, Scalar],
     ) -> bool:
-        for comparison in container.restrictions:
+        return MissionDatabase._matches_comparisons(
+            container.restrictions, values, context
+        )
+
+    @staticmethod
+    def _matches_comparisons(
+        comparisons: tuple[Comparison, ...],
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+    ) -> bool:
+        for comparison in comparisons:
             if isinstance(comparison.left, ParameterReference):
                 name = QualifiedName.parse(comparison.left.reference)
                 if name not in values:
@@ -451,6 +723,18 @@ class MissionDatabase:
                     f"cannot compare {left!r} and {right!r}"
                 ) from error
         return True
+
+
+def _in_alarm_range(value: int | float, alarm: NumericAlarmRange) -> bool:
+    if alarm.minimum is not None and (
+        value < alarm.minimum
+        or (value == alarm.minimum and not alarm.minimum_inclusive)
+    ):
+        return False
+    return alarm.maximum is None or not (
+        value > alarm.maximum
+        or (value == alarm.maximum and not alarm.maximum_inclusive)
+    )
 
 
 def _compare(left: object, operator: ComparisonOperator, right: object) -> bool:

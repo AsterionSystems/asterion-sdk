@@ -7,9 +7,12 @@ MissionDatabaseBuilder
             ↓ compile and validate
 immutable MissionDatabase
             ↓
-telemetry decoding and future command encoding
+extract → calibrate → validate → alarm → select container
 ```
 
 The package accepts raw bytes and optional context. Protocol adapters may provide
 values such as a CCSDS APID, but `asterion-mdb` never imports transport packages.
 Format-specific source fidelity belongs to adapters, not runtime definitions.
+
+Evaluation is intentionally stateless. Historical values, latching, hysteresis,
+and change alarms belong to a future processing layer with an explicit lifecycle.

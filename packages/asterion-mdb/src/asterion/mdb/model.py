@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from types import MappingProxyType
 
 from .errors import MdbValidationError
@@ -75,6 +75,43 @@ class PolynomialCalibrator:
         return sum(value * raw**power for power, value in enumerate(self.coefficients))
 
 
+class AlarmSeverity(IntEnum):
+    """XTCE-aligned alarm severity ordered from least to most severe."""
+
+    WATCH = 1
+    WARNING = 2
+    DISTRESS = 3
+    CRITICAL = 4
+    SEVERE = 5
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCalibrator:
+    """A polynomial calibrator selected when all criteria match."""
+
+    criteria: tuple[Comparison, ...]
+    calibrator: PolynomialCalibrator
+
+
+@dataclass(frozen=True, slots=True)
+class NumericAlarmRange:
+    """An engineering-value alarm interval with independently inclusive bounds."""
+
+    severity: AlarmSeverity
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    minimum_inclusive: bool = True
+    maximum_inclusive: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class EnumerationAlarm:
+    """An alarm associated with one raw enumerated value."""
+
+    raw_value: int
+    severity: AlarmSeverity
+
+
 @dataclass(frozen=True, slots=True)
 class IntegerParameterType:
     name: QualifiedName
@@ -83,6 +120,9 @@ class IntegerParameterType:
     byte_order: ByteOrder = ByteOrder.BIG_ENDIAN
     unit: str | None = None
     calibrator: PolynomialCalibrator | None = None
+    contextual_calibrators: tuple[ContextCalibrator, ...] = ()
+    validity_criteria: tuple[Comparison, ...] = ()
+    alarm_ranges: tuple[NumericAlarmRange, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +132,9 @@ class FloatParameterType:
     byte_order: ByteOrder = ByteOrder.BIG_ENDIAN
     unit: str | None = None
     calibrator: PolynomialCalibrator | None = None
+    contextual_calibrators: tuple[ContextCalibrator, ...] = ()
+    validity_criteria: tuple[Comparison, ...] = ()
+    alarm_ranges: tuple[NumericAlarmRange, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +142,7 @@ class BooleanParameterType:
     name: QualifiedName
     size_bits: int = 1
     byte_order: ByteOrder = ByteOrder.BIG_ENDIAN
+    validity_criteria: tuple[Comparison, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,12 +152,15 @@ class EnumeratedParameterType:
     choices: tuple[tuple[int, str], ...]
     signed: bool = False
     byte_order: ByteOrder = ByteOrder.BIG_ENDIAN
+    validity_criteria: tuple[Comparison, ...] = ()
+    alarms: tuple[EnumerationAlarm, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class BinaryParameterType:
     name: QualifiedName
     size_bits: int
+    validity_criteria: tuple[Comparison, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +169,7 @@ class StringParameterType:
     size_bits: int
     encoding: StringEncoding = StringEncoding.ASCII
     strip_padding: bytes = b"\x00"
+    validity_criteria: tuple[Comparison, ...] = ()
 
 
 type ParameterType = (
@@ -200,6 +248,8 @@ class ParameterValue:
     raw_value: RawValue
     value: EngineeringValue
     unit: str | None
+    is_valid: bool = True
+    alarm_severity: AlarmSeverity | None = None
 
 
 @dataclass(frozen=True, slots=True)

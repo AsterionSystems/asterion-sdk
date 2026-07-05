@@ -31,6 +31,26 @@ class InsufficientDataError(MdbDecodeError):
         )
 
 
+class MdbEvaluationError(MdbDecodeError):
+    """Base exception for runtime calibration, validity, and alarm evaluation."""
+
+
+class CalibrationSelectionError(MdbEvaluationError):
+    """Raised when contextual calibration cannot be selected unambiguously."""
+
+
+class CalibrationError(MdbEvaluationError):
+    """Raised when a selected calibrator cannot evaluate a raw value."""
+
+
+class ValidityEvaluationError(MdbEvaluationError):
+    """Raised when parameter validity criteria cannot be evaluated."""
+
+
+class AlarmEvaluationError(MdbEvaluationError):
+    """Raised when alarm state cannot be evaluated."""
+
+
 class ContainerSelectionError(MdbDecodeError):
     """Base exception for derived-container selection failures."""
 

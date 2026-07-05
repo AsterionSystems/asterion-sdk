@@ -82,11 +82,7 @@ def decode_parameter(
             byte_order=parameter_type.byte_order,
         )
         raw = integer
-        value = (
-            parameter_type.calibrator.calibrate(integer)
-            if parameter_type.calibrator
-            else integer
-        )
+        value = integer
         unit = parameter_type.unit
     elif isinstance(parameter_type, FloatParameterType):
         raw_bytes = data[offset // 8 : end // 8]
@@ -94,11 +90,7 @@ def decode_parameter(
         prefix = ">" if parameter_type.byte_order is ByteOrder.BIG_ENDIAN else "<"
         floating = struct.unpack(prefix + format_code, raw_bytes)[0]
         raw = floating
-        value = (
-            parameter_type.calibrator.calibrate(floating)
-            if parameter_type.calibrator
-            else floating
-        )
+        value = floating
         unit = parameter_type.unit
     elif isinstance(parameter_type, BooleanParameterType):
         integer = extract_integer(
