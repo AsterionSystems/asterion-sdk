@@ -1,0 +1,16 @@
+.idea/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/

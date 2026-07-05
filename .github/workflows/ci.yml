@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Synchronize dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run basedpyright
+
+      - name: Test with coverage
+        run: uv run pytest --cov=asterion.ccsds --cov-report=term-missing
+
+      - name: Build package
+        run: uv build --package asterion-ccsds
+
+      - name: Verify wheel
+        run: uv run python scripts/verify_wheel.py dist/asterion_ccsds-0.1.0-py3-none-any.whl
+
+      - name: Test installed wheel
+        run: |
+          uv venv .wheel-venv --python 3.12
+          uv pip install --python .wheel-venv/bin/python dist/asterion_ccsds-0.1.0-py3-none-any.whl
+          .wheel-venv/bin/python -c "from asterion.ccsds import SpacePacket, SpacePacketDecoder"
+
+  compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-suffix: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
+
+      - name: Synchronize dependencies
+        run: uv sync --locked
+
+      - name: Test Python ${{ matrix.python-version }}
+        run: uv run --frozen pytest

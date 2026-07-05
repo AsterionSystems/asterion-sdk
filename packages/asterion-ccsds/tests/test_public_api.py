@@ -1,0 +1,35 @@
+import asterion.ccsds
+
+
+def test_public_api_exports_are_stable() -> None:
+    assert set(asterion.ccsds.__all__) == {
+        "BytesLike",
+        "CcsdsError",
+        "DecodedPacketData",
+        "DecoderStateError",
+        "IDLE_APID",
+        "IncompletePacketError",
+        "MAX_APID",
+        "MAX_PACKET_DATA_LENGTH",
+        "MAX_PACKET_LENGTH",
+        "MAX_SEQUENCE_COUNT",
+        "PRIMARY_HEADER_SIZE",
+        "PacketDecodeError",
+        "PacketType",
+        "PacketValidationError",
+        "ReassembledPacketData",
+        "ReassemblyError",
+        "SPACE_PACKET_VERSION",
+        "SecondaryHeaderCodec",
+        "SecondaryHeaderError",
+        "SequenceCounter",
+        "SequenceFlags",
+        "SpacePacket",
+        "SpacePacketDecoder",
+        "SpacePacketHeader",
+        "SpacePacketReassembler",
+        "create_packet_with_secondary_header",
+        "decode_packet_data",
+        "decode_packets",
+        "encode_packet_data",
+    }
