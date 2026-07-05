@@ -107,6 +107,33 @@ The decoder deliberately does not scan for a new packet after malformed data.
 Raw Space Packets have no synchronization marker, so reliable resynchronization
 requires an external framing layer.
 
+## Managing sequence counts
+
+`SpacePacket.create()` is deliberately stateless when the application already
+owns its sequence counts. For automatic per-stream sequencing, use
+`SequenceCounter`:
+
+```python
+from asterion.ccsds import PacketType, SequenceCounter
+
+counter = SequenceCounter()
+packet = counter.create_packet(
+    apid=42,
+    packet_type=PacketType.TELEMETRY,
+    data=b"payload",
+)
+```
+
+Streams are identified by APID, as specified by CCSDS 133.0-B-2. Telemetry and
+telecommand packets sharing an APID therefore consume the same sequence. The
+first packet uses `initial_value` (zero by default), and values wrap from 16383
+to zero. Use `peek()`, `set_next()`, `reset_stream()`, or `reset()` when explicit
+state control is needed.
+
+Counter instances contain only in-memory state. They are not global, persistent,
+or thread-safe; applications sharing an instance across threads must synchronize
+access.
+
 APID 2047 is reserved for idle packets. The package exports `IDLE_APID` and
 provides `packet.is_idle` and `packet.header.is_idle` for identification without
 imposing mission-specific idle-data rules.

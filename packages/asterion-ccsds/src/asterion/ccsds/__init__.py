@@ -17,6 +17,7 @@ from .packet import (
     SpacePacket,
     SpacePacketHeader,
 )
+from .sequence import SequenceCounter
 from .stream import (
     DecoderStateError,
     IncompletePacketError,
@@ -39,6 +40,7 @@ __all__ = [
     "PacketDecodeError",
     "PacketType",
     "PacketValidationError",
+    "SequenceCounter",
     "SequenceFlags",
     "SpacePacket",
     "SpacePacketDecoder",
