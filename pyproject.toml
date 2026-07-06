@@ -2,11 +2,12 @@
 name = "asterion-sdk"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["asterion-ccsds", "asterion-mdb"]
+dependencies = ["asterion-ccsds", "asterion-mdb", "asterion-xtce"]
 
 [tool.uv.sources]
 asterion-ccsds = { workspace = true }
 asterion-mdb = { workspace = true }
+asterion-xtce = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -26,7 +27,7 @@ testpaths = ["packages"]
 
 [tool.coverage.run]
 branch = true
-source = ["asterion.ccsds", "asterion.mdb"]
+source = ["asterion.ccsds", "asterion.mdb", "asterion.xtce"]
 
 [tool.coverage.report]
 fail_under = 90
@@ -48,6 +49,8 @@ include = [
     "packages/asterion-ccsds/tests",
     "packages/asterion-mdb/src",
     "packages/asterion-mdb/tests",
+    "packages/asterion-xtce/src",
+    "packages/asterion-xtce/tests",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

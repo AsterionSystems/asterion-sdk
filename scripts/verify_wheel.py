@@ -12,6 +12,7 @@ def verify_wheel(wheel_path: Path) -> None:
     distributions = {
         "asterion_ccsds": ("asterion-ccsds", "ccsds"),
         "asterion_mdb": ("asterion-mdb", "mdb"),
+        "asterion_xtce": ("asterion-xtce", "xtce"),
     }
     distribution_key = next(
         (key for key in distributions if wheel_path.name.startswith(key + "-")), None

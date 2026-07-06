@@ -3,20 +3,20 @@
 Asterion SDK is a modern Python monorepo for independently published space
 systems packages. Packages share the PEP 420 `asterion` namespace, so consumers
 can install only what they need while using consistent imports such as
-`asterion.ccsds` and, in the future, `asterion.pus`.
+`asterion.ccsds`, `asterion.mdb`, and `asterion.xtce`.
 
 The repository contains `asterion-ccsds`, a typed CCSDS Space Packet
-implementation, and `asterion-mdb`, a protocol-neutral mission database and
-telemetry decoder. Both packages have dependency-free runtimes.
+implementation; `asterion-mdb`, a protocol-neutral mission database and
+telemetry decoder; and `asterion-xtce`, a strict XTCE telemetry loader.
 
 ## Repository layout
 
 ```text
 .
 ├── packages/
-│   └── asterion-ccsds/
-│       ├── src/asterion/ccsds/
-│       └── tests/
+│   ├── asterion-ccsds/
+│   ├── asterion-mdb/
+│   └── asterion-xtce/
 ├── pyproject.toml          # Shared development tool configuration
 └── uv.lock                 # Reproducible workspace dependencies
 ```
