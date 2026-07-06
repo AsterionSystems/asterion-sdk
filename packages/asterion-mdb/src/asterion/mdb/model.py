@@ -113,6 +113,16 @@ class EnumerationAlarm:
 
 
 @dataclass(frozen=True, slots=True)
+class DynamicDimension:
+    """A bounded integer dimension derived from a parameter or caller context."""
+
+    source: ParameterReference | ContextReference
+    maximum: int
+    multiplier: int = 1
+    offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class IntegerParameterType:
     name: QualifiedName
     size_bits: int
@@ -159,20 +169,41 @@ class EnumeratedParameterType:
 @dataclass(frozen=True, slots=True)
 class BinaryParameterType:
     name: QualifiedName
-    size_bits: int
+    size_bits: int | DynamicDimension
     validity_criteria: tuple[Comparison, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class StringParameterType:
     name: QualifiedName
-    size_bits: int
+    size_bits: int | DynamicDimension
     encoding: StringEncoding = StringEncoding.ASCII
     strip_padding: bytes = b"\x00"
     validity_criteria: tuple[Comparison, ...] = ()
 
 
-type ParameterType = (
+@dataclass(frozen=True, slots=True)
+class ArrayParameterType:
+    name: QualifiedName
+    element_type_ref: str | QualifiedName
+    element_count: int | DynamicDimension
+    validity_criteria: tuple[Comparison, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateMember:
+    name: str
+    type_ref: str | QualifiedName
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateParameterType:
+    name: QualifiedName
+    members: tuple[AggregateMember, ...]
+    validity_criteria: tuple[Comparison, ...] = ()
+
+
+type ScalarParameterType = (
     IntegerParameterType
     | FloatParameterType
     | BooleanParameterType
@@ -180,6 +211,8 @@ type ParameterType = (
     | BinaryParameterType
     | StringParameterType
 )
+
+type ParameterType = ScalarParameterType | ArrayParameterType | AggregateParameterType
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +239,16 @@ class ParameterEntry:
     parameter_ref: str | QualifiedName
     position: EntryPosition = EntryPosition.SEQUENTIAL
     bit_offset: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RepeatEntry:
+    name: str
+    entries: tuple[ParameterEntry, ...]
+    count: int | DynamicDimension
+
+
+type ContainerEntry = ParameterEntry | RepeatEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +280,7 @@ class Comparison:
 @dataclass(frozen=True, slots=True)
 class SequenceContainer:
     name: QualifiedName
-    entries: tuple[ParameterEntry, ...] = ()
+    entries: tuple[ContainerEntry, ...] = ()
     base_container_ref: str | QualifiedName | None = None
     restrictions: tuple[Comparison, ...] = ()
 
@@ -245,11 +288,65 @@ class SequenceContainer:
 @dataclass(frozen=True, slots=True)
 class ParameterValue:
     parameter: ParameterDefinition
-    raw_value: RawValue
-    value: EngineeringValue
+    raw_value: RuntimeRawValue
+    value: RuntimeValue
     unit: str | None
     is_valid: bool = True
     alarm_severity: AlarmSeverity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ElementValue:
+    raw_value: RuntimeRawValue
+    value: RuntimeValue
+    unit: str | None
+    is_valid: bool
+    alarm_severity: AlarmSeverity | None
+
+
+@dataclass(frozen=True, slots=True)
+class ArrayValue:
+    elements: tuple[ElementValue, ...]
+
+    def __len__(self) -> int:
+        return len(self.elements)
+
+    def __iter__(self):
+        return iter(self.elements)
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateMemberValue:
+    member: AggregateMember
+    raw_value: RuntimeRawValue
+    value: RuntimeValue
+    unit: str | None
+    is_valid: bool
+    alarm_severity: AlarmSeverity | None
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateValue:
+    members: tuple[AggregateMemberValue, ...]
+    by_name: MappingProxyType[str, AggregateMemberValue] = field(
+        repr=False, compare=False
+    )
+
+    def __getitem__(self, name: str) -> AggregateMemberValue:
+        return self.by_name[name]
+
+
+type RuntimeValue = EngineeringValue | ArrayValue | AggregateValue
+type RuntimeRawValue = RawValue | tuple["RuntimeRawValue", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RepeatedEntryValue:
+    name: str
+    rows: tuple[tuple[ParameterValue, ...], ...]
+
+    def __len__(self) -> int:
+        return len(self.rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,4 +356,8 @@ class DecodedContainer:
     consumed_bits: int
     by_name: MappingProxyType[QualifiedName, ParameterValue] = field(
         repr=False, compare=False
+    )
+    repeated_entries: tuple[RepeatedEntryValue, ...] = ()
+    repeats_by_name: MappingProxyType[str, RepeatedEntryValue] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
     )

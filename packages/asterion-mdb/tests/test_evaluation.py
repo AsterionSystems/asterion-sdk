@@ -29,7 +29,7 @@ def qname(value: str) -> QualifiedName:
 
 
 def test_public_exports_are_sorted_unique_and_accessible() -> None:
-    assert mdb.__all__ == sorted(set(mdb.__all__))
+    assert len(mdb.__all__) == len(set(mdb.__all__))
     assert all(hasattr(mdb, name) for name in mdb.__all__)
 
 

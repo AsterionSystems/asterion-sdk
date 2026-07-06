@@ -17,10 +17,10 @@ from .model import (
     FloatParameterType,
     IntegerParameterType,
     ParameterDefinition,
-    ParameterType,
     ParameterValue,
     QualifiedName,
     RawValue,
+    ScalarParameterType,
 )
 
 type BytesLike = bytes | bytearray | memoryview
@@ -63,9 +63,11 @@ def decode_parameter(
     *,
     offset: int,
     parameter: ParameterDefinition,
-    parameter_type: ParameterType,
+    parameter_type: ScalarParameterType,
 ) -> tuple[ParameterValue, int]:
     size = parameter_type.size_bits
+    if not isinstance(size, int):
+        raise MdbDecodeError("dynamic size must be resolved before extraction")
     end = offset + size
     if end > len(data) * 8:
         raise InsufficientDataError(required_bits=end, available_bits=len(data) * 8)
@@ -119,7 +121,7 @@ def decode_parameter(
         raw_bytes = data[offset // 8 : end // 8]
         raw = raw_bytes
         unpadded = raw_bytes
-        while unpadded.endswith(parameter_type.strip_padding):
+        while unpadded and unpadded.endswith(parameter_type.strip_padding):
             unpadded = unpadded[: -len(parameter_type.strip_padding)]
         try:
             value = unpadded.decode(parameter_type.encoding.value)

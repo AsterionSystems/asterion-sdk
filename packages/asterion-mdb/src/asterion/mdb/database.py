@@ -13,14 +13,22 @@ from .errors import (
     AmbiguousContainerError,
     CalibrationError,
     CalibrationSelectionError,
+    DynamicDimensionError,
     MdbDecodeError,
     MdbValidationError,
     NoMatchingContainerError,
     ReferenceResolutionError,
+    StructureLimitError,
     ValidityEvaluationError,
 )
 from .model import (
+    AggregateMember,
+    AggregateMemberValue,
+    AggregateParameterType,
+    AggregateValue,
     AlarmSeverity,
+    ArrayParameterType,
+    ArrayValue,
     BinaryParameterType,
     BooleanParameterType,
     ByteOrder,
@@ -29,6 +37,9 @@ from .model import (
     ContextCalibrator,
     ContextReference,
     DecodedContainer,
+    DynamicDimension,
+    ElementValue,
+    EntryPosition,
     EnumeratedParameterType,
     EnumeratedValue,
     EnumerationAlarm,
@@ -42,11 +53,18 @@ from .model import (
     ParameterValue,
     PolynomialCalibrator,
     QualifiedName,
+    RepeatedEntryValue,
+    RepeatEntry,
+    RuntimeRawValue,
     Scalar,
     SequenceContainer,
     SpaceSystem,
+    StringEncoding,
     StringParameterType,
 )
+
+DEFAULT_MAX_STRUCTURE_DEPTH = 32
+DEFAULT_MAX_DECODED_VALUES = 100_000
 
 
 def _owner(name: QualifiedName) -> QualifiedName:
@@ -86,14 +104,32 @@ def _resolve_reference[T](
 class MissionDatabaseBuilder:
     """Mutable collector that validates and compiles mission definitions."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        max_structure_depth: int = DEFAULT_MAX_STRUCTURE_DEPTH,
+        max_decoded_values: int = DEFAULT_MAX_DECODED_VALUES,
+    ) -> None:
         if not isinstance(name, str) or not name or "/" in name:
             raise MdbValidationError("database name must be one non-empty path segment")
         self.name = name
+        self.max_structure_depth = self._positive_limit(
+            max_structure_depth, "max_structure_depth"
+        )
+        self.max_decoded_values = self._positive_limit(
+            max_decoded_values, "max_decoded_values"
+        )
         self._systems: dict[QualifiedName, SpaceSystem] = {}
         self._types: dict[QualifiedName, ParameterType] = {}
         self._parameters: dict[QualifiedName, ParameterDefinition] = {}
         self._containers: dict[QualifiedName, SequenceContainer] = {}
+
+    @staticmethod
+    def _positive_limit(value: int, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise MdbValidationError(f"{name} must be a positive integer")
+        return value
 
     def add_space_system(self, system: SpaceSystem) -> None:
         if not isinstance(system, SpaceSystem):
@@ -110,6 +146,8 @@ class MissionDatabaseBuilder:
                 EnumeratedParameterType,
                 BinaryParameterType,
                 StringParameterType,
+                ArrayParameterType,
+                AggregateParameterType,
             ),
         ):
             raise MdbValidationError("parameter type is not supported")
@@ -134,6 +172,7 @@ class MissionDatabaseBuilder:
         }
         parameters, aliases = self._resolve_parameters(types)
         types = self._resolve_type_evaluation(types, parameters)
+        self._validate_type_cycles(types)
         containers = self._resolve_containers(parameters)
         self._validate_container_cycles(containers)
         derived: dict[QualifiedName, list[QualifiedName]] = {}
@@ -151,6 +190,8 @@ class MissionDatabaseBuilder:
             derived_containers=MappingProxyType(
                 {name: tuple(children) for name, children in derived.items()}
             ),
+            max_structure_depth=self.max_structure_depth,
+            max_decoded_values=self.max_decoded_values,
         )
 
     @staticmethod
@@ -184,6 +225,8 @@ class MissionDatabaseBuilder:
         if isinstance(
             value, (IntegerParameterType, BooleanParameterType, EnumeratedParameterType)
         ):
+            if not isinstance(value.byte_order, ByteOrder):
+                raise MdbValidationError(f"{value.name} byte order is invalid")
             if value.size_bits < 1:
                 raise MdbValidationError(f"{value.name} size_bits must be positive")
             if value.byte_order is ByteOrder.LITTLE_ENDIAN and value.size_bits % 8:
@@ -198,20 +241,77 @@ class MissionDatabaseBuilder:
                     )
                 MissionDatabaseBuilder._validate_enumeration_alarms(value)
         elif isinstance(value, FloatParameterType):
+            if not isinstance(value.byte_order, ByteOrder):
+                raise MdbValidationError(f"{value.name} byte order is invalid")
             if value.size_bits not in (32, 64):
                 raise MdbValidationError(f"{value.name} float size must be 32 or 64")
         elif isinstance(value, (BinaryParameterType, StringParameterType)):
-            if value.size_bits < 8 or value.size_bits % 8:
-                raise MdbValidationError(
-                    f"{value.name} size must be positive whole bytes"
+            if isinstance(value.size_bits, int):
+                if isinstance(value.size_bits, bool) or (
+                    value.size_bits < 8 or value.size_bits % 8
+                ):
+                    raise MdbValidationError(
+                        f"{value.name} size must be positive whole bytes"
+                    )
+            else:
+                MissionDatabaseBuilder._validate_dimension(
+                    value.size_bits, f"{value.name} size"
                 )
             if isinstance(value, StringParameterType) and not value.strip_padding:
                 raise MdbValidationError(
                     f"{value.name} strip_padding must not be empty"
                 )
+            if isinstance(value, StringParameterType) and (
+                not isinstance(value.strip_padding, bytes)
+                or not isinstance(value.encoding, StringEncoding)
+            ):
+                raise MdbValidationError(f"{value.name} string encoding is invalid")
+        elif isinstance(value, ArrayParameterType):
+            MissionDatabaseBuilder._validate_count(
+                value.element_count, f"{value.name} element count"
+            )
+        elif isinstance(value, AggregateParameterType):
+            if any(not isinstance(member, AggregateMember) for member in value.members):
+                raise MdbValidationError(f"{value.name} aggregate members are invalid")
+            names = [member.name for member in value.members]
+            if any(not isinstance(name, str) or not name for name in names):
+                raise MdbValidationError(
+                    f"{value.name} aggregate member names must not be empty"
+                )
+            if len(names) != len(set(names)):
+                raise MdbValidationError(
+                    f"{value.name} has duplicate aggregate member names"
+                )
         if isinstance(value, (IntegerParameterType, FloatParameterType)):
             MissionDatabaseBuilder._validate_numeric_evaluation(value)
         return value
+
+    @staticmethod
+    def _validate_count(value: int | DynamicDimension, label: str) -> None:
+        if isinstance(value, DynamicDimension):
+            MissionDatabaseBuilder._validate_dimension(value, label)
+        elif isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise MdbValidationError(f"{label} must be a nonnegative integer")
+
+    @staticmethod
+    def _validate_dimension(value: DynamicDimension, label: str) -> None:
+        if not isinstance(value, DynamicDimension):
+            raise MdbValidationError(f"{label} must be fixed or dynamic")
+        if not isinstance(value.source, (ParameterReference, ContextReference)):
+            raise MdbValidationError(f"{label} source is invalid")
+        if isinstance(value.source, ContextReference) and (
+            not isinstance(value.source.name, str) or not value.source.name
+        ):
+            raise MdbValidationError(f"{label} context source is invalid")
+        for field_name, field_value in (
+            ("maximum", value.maximum),
+            ("multiplier", value.multiplier),
+            ("offset", value.offset),
+        ):
+            if isinstance(field_value, bool) or not isinstance(field_value, int):
+                raise MdbValidationError(f"{label} {field_name} must be an integer")
+        if value.maximum < 1:
+            raise MdbValidationError(f"{label} maximum must be positive")
 
     @staticmethod
     def _validate_numeric_evaluation(
@@ -339,8 +439,90 @@ class MissionDatabaseBuilder:
                     for item in parameter_type.contextual_calibrators
                 )
                 changes["contextual_calibrators"] = contextual
+            if isinstance(parameter_type, (BinaryParameterType, StringParameterType)):
+                if isinstance(parameter_type.size_bits, DynamicDimension):
+                    changes["size_bits"] = self._resolve_dimension(
+                        parameter_type.size_bits,
+                        owner=owner,
+                        parameters=parameters,
+                    )
+            elif isinstance(parameter_type, ArrayParameterType):
+                changes["element_type_ref"] = _resolve_reference(
+                    parameter_type.element_type_ref,
+                    owner=owner,
+                    definitions=types,
+                )
+                if isinstance(parameter_type.element_count, DynamicDimension):
+                    changes["element_count"] = self._resolve_dimension(
+                        parameter_type.element_count,
+                        owner=owner,
+                        parameters=parameters,
+                    )
+            elif isinstance(parameter_type, AggregateParameterType):
+                changes["members"] = tuple(
+                    replace(
+                        member,
+                        type_ref=_resolve_reference(
+                            member.type_ref,
+                            owner=owner,
+                            definitions=types,
+                        ),
+                    )
+                    for member in parameter_type.members
+                )
             resolved[name] = replace(parameter_type, **changes)
         return resolved
+
+    @staticmethod
+    def _resolve_dimension(
+        dimension: DynamicDimension,
+        *,
+        owner: QualifiedName,
+        parameters: Mapping[QualifiedName, ParameterDefinition],
+    ) -> DynamicDimension:
+        if isinstance(dimension.source, ParameterReference):
+            source = ParameterReference(
+                _resolve_reference(
+                    dimension.source.reference,
+                    owner=owner,
+                    definitions=parameters,
+                )
+            )
+            return replace(dimension, source=source)
+        if not dimension.source.name:
+            raise MdbValidationError("dimension context name must not be empty")
+        return dimension
+
+    def _validate_type_cycles(
+        self, types: Mapping[QualifiedName, ParameterType]
+    ) -> None:
+        def children(parameter_type: ParameterType) -> tuple[QualifiedName, ...]:
+            if isinstance(parameter_type, ArrayParameterType):
+                return (QualifiedName.parse(parameter_type.element_type_ref),)
+            if isinstance(parameter_type, AggregateParameterType):
+                return tuple(
+                    QualifiedName.parse(member.type_ref)
+                    for member in parameter_type.members
+                )
+            return ()
+
+        def visit(
+            name: QualifiedName,
+            path: tuple[QualifiedName, ...],
+            structured_depth: int,
+        ) -> None:
+            if name in path:
+                raise MdbValidationError(f"structured type cycle includes {name}")
+            nested = children(types[name])
+            if nested and structured_depth >= self.max_structure_depth:
+                raise MdbValidationError(
+                    f"structured type nesting exceeds {self.max_structure_depth}"
+                )
+            for child in nested:
+                visit(child, (*path, name), structured_depth + 1)
+
+        for name in types:
+            visit(name, (), 0)
 
     @staticmethod
     def _resolve_comparisons(
@@ -382,33 +564,53 @@ class MissionDatabaseBuilder:
         resolved: dict[QualifiedName, SequenceContainer] = {}
         for container in self._containers.values():
             owner = _owner(container.name)
-            entries: list[ParameterEntry] = []
+            entries: list[ParameterEntry | RepeatEntry] = []
             seen: set[QualifiedName] = set()
+            repeat_names: set[str] = set()
             for entry in container.entries:
-                parameter_name = _resolve_reference(
-                    entry.parameter_ref, owner=owner, definitions=parameters
+                if isinstance(entry, RepeatEntry):
+                    if (
+                        not isinstance(entry.name, str)
+                        or not entry.name
+                        or entry.name in repeat_names
+                    ):
+                        raise MdbValidationError(
+                            f"container {container.name} has invalid duplicate repeat name"
+                        )
+                    repeat_names.add(entry.name)
+                    self._validate_count(entry.count, f"repeat {entry.name} count")
+                    count = entry.count
+                    if isinstance(count, DynamicDimension):
+                        count = self._resolve_dimension(
+                            count, owner=owner, parameters=parameters
+                        )
+                    repeat_entries: list[ParameterEntry] = []
+                    repeat_seen: set[QualifiedName] = set()
+                    for repeated in entry.entries:
+                        resolved_entry, parameter_name = self._resolve_parameter_entry(
+                            repeated, owner=owner, parameters=parameters
+                        )
+                        if parameter_name in repeat_seen:
+                            raise MdbValidationError(
+                                f"repeat {entry.name} decodes {parameter_name} more than once"
+                            )
+                        repeat_seen.add(parameter_name)
+                        repeat_entries.append(resolved_entry)
+                    entries.append(
+                        replace(entry, entries=tuple(repeat_entries), count=count)
+                    )
+                    continue
+                if not isinstance(entry, ParameterEntry):
+                    raise MdbValidationError("container entry is not supported")
+                resolved_entry, parameter_name = self._resolve_parameter_entry(
+                    entry, owner=owner, parameters=parameters
                 )
                 if parameter_name in seen:
                     raise MdbValidationError(
                         f"container {container.name} decodes {parameter_name} more than once"
                     )
                 seen.add(parameter_name)
-                if entry.position.value == "absolute":
-                    if isinstance(entry.bit_offset, bool) or not isinstance(
-                        entry.bit_offset, int
-                    ):
-                        raise MdbValidationError(
-                            "absolute entries require an integer bit_offset"
-                        )
-                    if entry.bit_offset < 0:
-                        raise MdbValidationError(
-                            "entry bit_offset must not be negative"
-                        )
-                elif entry.bit_offset is not None:
-                    raise MdbValidationError(
-                        "sequential entries cannot define bit_offset"
-                    )
-                entries.append(replace(entry, parameter_ref=parameter_name))
+                entries.append(resolved_entry)
 
             base = None
             if container.base_container_ref is not None:
@@ -417,30 +619,43 @@ class MissionDatabaseBuilder:
                     owner=owner,
                     definitions=self._containers,
                 )
-            restrictions: list[Comparison] = []
-            for comparison in container.restrictions:
-                if isinstance(comparison.left, ParameterReference):
-                    parameter_name = _resolve_reference(
-                        comparison.left.reference,
-                        owner=owner,
-                        definitions=parameters,
-                    )
-                    comparison = replace(
-                        comparison,
-                        left=ParameterReference(parameter_name),
-                    )
-                elif not comparison.left.name:
-                    raise MdbValidationError(
-                        "context reference names must not be empty"
-                    )
-                restrictions.append(comparison)
+            restrictions = self._resolve_comparisons(
+                container.restrictions, owner=owner, parameters=parameters
+            )
             resolved[container.name] = replace(
                 container,
                 entries=tuple(entries),
                 base_container_ref=base,
-                restrictions=tuple(restrictions),
+                restrictions=restrictions,
             )
         return resolved
+
+    @staticmethod
+    def _resolve_parameter_entry(
+        entry: ParameterEntry,
+        *,
+        owner: QualifiedName,
+        parameters: Mapping[QualifiedName, ParameterDefinition],
+    ) -> tuple[ParameterEntry, QualifiedName]:
+        if not isinstance(entry, ParameterEntry):
+            raise MdbValidationError("repeat groups may contain only parameter entries")
+        parameter_name = _resolve_reference(
+            entry.parameter_ref, owner=owner, definitions=parameters
+        )
+        if not isinstance(entry.position, EntryPosition):
+            raise MdbValidationError("entry position is invalid")
+        if entry.position is EntryPosition.ABSOLUTE:
+            if isinstance(entry.bit_offset, bool) or not isinstance(
+                entry.bit_offset, int
+            ):
+                raise MdbValidationError(
+                    "absolute entries require an integer bit_offset"
+                )
+            if entry.bit_offset < 0:
+                raise MdbValidationError("entry bit_offset must not be negative")
+        elif entry.bit_offset is not None:
+            raise MdbValidationError("sequential entries cannot define bit_offset")
+        return replace(entry, parameter_ref=parameter_name), parameter_name
 
     @staticmethod
     def _validate_container_cycles(
@@ -470,6 +685,8 @@ class MissionDatabase:
     aliases: MappingProxyType[str, QualifiedName]
     containers: MappingProxyType[QualifiedName, SequenceContainer]
     derived_containers: MappingProxyType[QualifiedName, tuple[QualifiedName, ...]]
+    max_structure_depth: int
+    max_decoded_values: int
 
     def parameter(self, reference: str | QualifiedName) -> ParameterDefinition:
         """Look up a parameter by absolute name or alias."""
@@ -496,6 +713,9 @@ class MissionDatabase:
             raise MdbDecodeError(f"unknown root container {root_name}")
         values: dict[QualifiedName, ParameterValue] = {}
         ordered: list[ParameterValue] = []
+        repeated: list[RepeatedEntryValue] = []
+        repeats_by_name: dict[str, RepeatedEntryValue] = {}
+        budget = [0]
         context_values = context or {}
         cursor = 0
         consumed = 0
@@ -516,6 +736,9 @@ class MissionDatabase:
                 values,
                 ordered,
                 context_values,
+                repeated,
+                repeats_by_name,
+                budget,
             )
 
         selected = self.containers[root_name]
@@ -543,12 +766,17 @@ class MissionDatabase:
                 values,
                 ordered,
                 context_values,
+                repeated,
+                repeats_by_name,
+                budget,
             )
         return DecodedContainer(
             container=selected,
             parameters=tuple(ordered),
             consumed_bits=consumed,
             by_name=immutable_values(values),
+            repeated_entries=tuple(repeated),
+            repeats_by_name=MappingProxyType(dict(repeats_by_name)),
         )
 
     def _decode_entries(
@@ -560,41 +788,271 @@ class MissionDatabase:
         values: dict[QualifiedName, ParameterValue],
         ordered: list[ParameterValue],
         context: Mapping[str, Scalar],
+        repeated: list[RepeatedEntryValue],
+        repeats_by_name: dict[str, RepeatedEntryValue],
+        budget: list[int],
     ) -> tuple[int, int]:
         for entry in container.entries:
+            if isinstance(entry, RepeatEntry):
+                count = self._resolve_dimension_value(
+                    entry.count, values=values, context=context
+                )
+                rows: list[tuple[ParameterValue, ...]] = []
+                for _ in range(count):
+                    iteration_start = cursor
+                    row: list[ParameterValue] = []
+                    for repeated_entry in entry.entries:
+                        if repeated_entry.bit_offset is not None:
+                            cursor = iteration_start + repeated_entry.bit_offset
+                        parameter_name = QualifiedName.parse(
+                            repeated_entry.parameter_ref
+                        )
+                        parameter = self.parameters[parameter_name]
+                        parameter_type = self.parameter_types[
+                            QualifiedName.parse(parameter.type_ref)
+                        ]
+                        decoded, cursor = self._decode_type(
+                            data,
+                            cursor,
+                            parameter,
+                            parameter_type,
+                            values,
+                            context,
+                            depth=0,
+                            budget=budget,
+                        )
+                        row.append(decoded)
+                        consumed = max(consumed, cursor)
+                    rows.append(tuple(row))
+                result = RepeatedEntryValue(entry.name, tuple(rows))
+                if entry.name in repeats_by_name:
+                    raise MdbDecodeError(f"duplicate repeat result name {entry.name!r}")
+                repeated.append(result)
+                repeats_by_name[entry.name] = result
+                continue
             if entry.bit_offset is not None:
                 cursor = entry.bit_offset
             parameter_name = QualifiedName.parse(entry.parameter_ref)
             parameter = self.parameters[parameter_name]
             type_name = QualifiedName.parse(parameter.type_ref)
             parameter_type = self.parameter_types[type_name]
-            if (
-                getattr(parameter_type, "byte_order", ByteOrder.BIG_ENDIAN)
-                is ByteOrder.LITTLE_ENDIAN
-                and cursor % 8
-            ):
-                raise MdbDecodeError(
-                    f"little-endian parameter {parameter.name} is not byte-aligned"
-                )
-            if (
-                isinstance(
-                    parameter_type,
-                    (FloatParameterType, BinaryParameterType, StringParameterType),
-                )
-                and cursor % 8
-            ):
-                raise MdbDecodeError(f"parameter {parameter.name} must be byte-aligned")
-            decoded, cursor = decode_parameter(
+            decoded, cursor = self._decode_type(
                 data,
-                offset=cursor,
-                parameter=parameter,
-                parameter_type=parameter_type,
+                cursor,
+                parameter,
+                parameter_type,
+                values,
+                context,
+                depth=0,
+                budget=budget,
             )
-            decoded = self._evaluate_parameter(decoded, parameter_type, values, context)
             values[parameter.name] = decoded
             ordered.append(decoded)
             consumed = max(consumed, cursor)
         return cursor, consumed
+
+    def _decode_type(
+        self,
+        data: bytes,
+        cursor: int,
+        parameter: ParameterDefinition,
+        parameter_type: ParameterType,
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+        *,
+        depth: int,
+        budget: list[int],
+    ) -> tuple[ParameterValue, int]:
+        if depth > self.max_structure_depth:
+            raise StructureLimitError(
+                f"structured value exceeds depth {self.max_structure_depth}"
+            )
+        if isinstance(parameter_type, ArrayParameterType):
+            count = self._resolve_dimension_value(
+                parameter_type.element_count, values=values, context=context
+            )
+            element_type = self.parameter_types[
+                QualifiedName.parse(parameter_type.element_type_ref)
+            ]
+            elements: list[ElementValue] = []
+            array_raw_values: list[RuntimeRawValue] = []
+            for _ in range(count):
+                decoded, cursor = self._decode_type(
+                    data,
+                    cursor,
+                    parameter,
+                    element_type,
+                    values,
+                    context,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+                elements.append(
+                    ElementValue(
+                        decoded.raw_value,
+                        decoded.value,
+                        decoded.unit,
+                        decoded.is_valid,
+                        decoded.alarm_severity,
+                    )
+                )
+                array_raw_values.append(decoded.raw_value)
+            array = ArrayValue(tuple(elements))
+            severity = max(
+                (item.alarm_severity for item in elements if item.alarm_severity),
+                default=None,
+            )
+            decoded = ParameterValue(
+                parameter,
+                tuple(array_raw_values),
+                array,
+                None,
+                all(item.is_valid for item in elements),
+                severity,
+            )
+            return self._evaluate_structured(
+                decoded, parameter_type, values, context
+            ), cursor
+        if isinstance(parameter_type, AggregateParameterType):
+            members: list[AggregateMemberValue] = []
+            aggregate_raw_values: list[RuntimeRawValue] = []
+            for member in parameter_type.members:
+                member_type = self.parameter_types[QualifiedName.parse(member.type_ref)]
+                decoded, cursor = self._decode_type(
+                    data,
+                    cursor,
+                    parameter,
+                    member_type,
+                    values,
+                    context,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+                members.append(
+                    AggregateMemberValue(
+                        member,
+                        decoded.raw_value,
+                        decoded.value,
+                        decoded.unit,
+                        decoded.is_valid,
+                        decoded.alarm_severity,
+                    )
+                )
+                aggregate_raw_values.append(decoded.raw_value)
+            aggregate = AggregateValue(
+                tuple(members),
+                MappingProxyType({item.member.name: item for item in members}),
+            )
+            severity = max(
+                (item.alarm_severity for item in members if item.alarm_severity),
+                default=None,
+            )
+            decoded = ParameterValue(
+                parameter,
+                tuple(aggregate_raw_values),
+                aggregate,
+                None,
+                all(item.is_valid for item in members),
+                severity,
+            )
+            return self._evaluate_structured(
+                decoded, parameter_type, values, context
+            ), cursor
+
+        budget[0] += 1
+        if budget[0] > self.max_decoded_values:
+            raise StructureLimitError(
+                f"decoded value count exceeds {self.max_decoded_values}"
+            )
+        concrete_type = parameter_type
+        if isinstance(parameter_type, (BinaryParameterType, StringParameterType)):
+            size = self._resolve_dimension_value(
+                parameter_type.size_bits, values=values, context=context
+            )
+            if size % 8:
+                raise DynamicDimensionError(
+                    f"parameter {parameter.name} size must be byte-aligned"
+                )
+            concrete_type = replace(parameter_type, size_bits=size)
+        if (
+            getattr(concrete_type, "byte_order", ByteOrder.BIG_ENDIAN)
+            is ByteOrder.LITTLE_ENDIAN
+            and cursor % 8
+        ):
+            raise MdbDecodeError(
+                f"little-endian parameter {parameter.name} is not byte-aligned"
+            )
+        if (
+            isinstance(
+                concrete_type,
+                (FloatParameterType, BinaryParameterType, StringParameterType),
+            )
+            and cursor % 8
+        ):
+            raise MdbDecodeError(f"parameter {parameter.name} must be byte-aligned")
+        decoded, cursor = decode_parameter(
+            data,
+            offset=cursor,
+            parameter=parameter,
+            parameter_type=concrete_type,
+        )
+        return self._evaluate_parameter(decoded, concrete_type, values, context), cursor
+
+    @classmethod
+    def _evaluate_structured(
+        cls,
+        decoded: ParameterValue,
+        parameter_type: ArrayParameterType | AggregateParameterType,
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+    ) -> ParameterValue:
+        try:
+            own_valid = cls._matches_comparisons(
+                parameter_type.validity_criteria, values, context
+            )
+        except MdbDecodeError as error:
+            raise ValidityEvaluationError(
+                f"cannot evaluate validity for {decoded.parameter.name}: {error}"
+            ) from error
+        is_valid = decoded.is_valid and own_valid
+        return replace(
+            decoded,
+            is_valid=is_valid,
+            alarm_severity=decoded.alarm_severity if is_valid else None,
+        )
+
+    @staticmethod
+    def _resolve_dimension_value(
+        dimension: int | DynamicDimension,
+        *,
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+    ) -> int:
+        if isinstance(dimension, int):
+            return dimension
+        if isinstance(dimension.source, ParameterReference):
+            name = QualifiedName.parse(dimension.source.reference)
+            if name not in values:
+                raise DynamicDimensionError(
+                    f"dimension source parameter {name} has not been decoded"
+                )
+            source: object = values[name].value
+        else:
+            if dimension.source.name not in context:
+                raise DynamicDimensionError(
+                    f"missing dimension context {dimension.source.name!r}"
+                )
+            source = context[dimension.source.name]
+        if isinstance(source, bool) or not isinstance(source, int):
+            raise DynamicDimensionError("dimension source must be an integer")
+        result = source * dimension.multiplier + dimension.offset
+        if result < 0:
+            raise DynamicDimensionError("resolved dimension must not be negative")
+        if result > dimension.maximum:
+            raise DynamicDimensionError(
+                f"resolved dimension {result} exceeds maximum {dimension.maximum}"
+            )
+        return result
 
     @classmethod
     def _evaluate_parameter(

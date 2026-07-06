@@ -51,6 +51,14 @@ class AlarmEvaluationError(MdbEvaluationError):
     """Raised when alarm state cannot be evaluated."""
 
 
+class DynamicDimensionError(MdbDecodeError):
+    """Raised when a dynamic dimension cannot be resolved safely."""
+
+
+class StructureLimitError(MdbDecodeError):
+    """Raised when structured decoding exceeds a configured resource limit."""
+
+
 class ContainerSelectionError(MdbDecodeError):
     """Base exception for derived-container selection failures."""
 

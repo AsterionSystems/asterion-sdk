@@ -57,5 +57,38 @@ are `WATCH`, `WARNING`, `DISTRESS`, `CRITICAL`, and `SEVERE`.
 
 The package supports fixed integer, float, boolean, enumeration, binary, and
 string fields, polynomial calibration, contextual calibration, validity, and
-static alarms. Commands, stateful/change alarms, dynamic fields, arrays,
-aggregates, time encodings, XTCE, and SCOS import are future milestones.
+static alarms.
+
+## Dynamic structures
+
+`ArrayParameterType` and `AggregateParameterType` compose scalar or structured
+types recursively. `DynamicDimension` obtains an element count or bit size from
+a previously decoded integer parameter or caller context:
+
+```python
+from asterion.mdb import ArrayParameterType, DynamicDimension, ParameterReference
+
+builder.add_parameter_type(
+    ArrayParameterType(
+        q("/Satellite/samples_t"),
+        element_type_ref="u8",
+        element_count=DynamicDimension(
+            ParameterReference("sample_count"), maximum=256
+        ),
+    )
+)
+```
+
+Every dynamic dimension has a mandatory maximum. The database additionally
+limits structured nesting and the total scalar values decoded per call. These
+limits are configurable on `MissionDatabaseBuilder` and default to 32 levels
+and 100,000 scalar values.
+
+`RepeatEntry` decodes bounded rows of arbitrary parameter entries. Repeated rows
+are available through `DecodedContainer.repeated_entries` and
+`repeats_by_name`; they are deliberately excluded from scalar `by_name` lookup
+and cannot drive later dimensions or criteria. Absolute offsets inside a repeat
+are relative to the beginning of each row.
+
+Commands, stateful/change alarms, time encodings, general expressions, indexed
+repeat references, XTCE, and SCOS import are future milestones.
