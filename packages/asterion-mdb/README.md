@@ -90,5 +90,40 @@ are available through `DecodedContainer.repeated_entries` and
 and cannot drive later dimensions or criteria. Absolute offsets inside a repeat
 are relative to the beginning of each row.
 
-Commands, stateful/change alarms, time encodings, general expressions, indexed
-repeat references, XTCE, and SCOS import are future milestones.
+## Time values
+
+Absolute and relative time types wrap an existing integer or floating-point
+encoding type. Calibration runs first; the time wrapper then applies exact
+`Decimal` scale and offset values:
+
+```python
+from datetime import UTC, datetime
+from decimal import Decimal
+from asterion.mdb import (
+    AbsoluteTimeParameterType, TimeEpochDefinition, TimeScale,
+)
+
+builder.add_time_epoch(
+    TimeEpochDefinition(
+        q("/Satellite/MissionEpoch"),
+        datetime(2026, 1, 1, tzinfo=UTC),
+        TimeScale.UTC,
+    )
+)
+builder.add_parameter_type(
+    AbsoluteTimeParameterType(
+        q("/Satellite/time_t"),
+        encoding_type_ref="u32",
+        epoch_ref="MissionEpoch",
+        seconds_per_unit=Decimal("0.001"),
+    )
+)
+```
+
+Canonical absolute values retain their epoch, time scale, and Decimal elapsed
+seconds. UTC values may be converted explicitly to `datetime`; TAI, GPS, and TT
+are never silently treated as UTC. The MDB performs no leap-second or clock
+correlation conversion.
+
+Commands, stateful/change alarms, CCSDS CUC/CDS time codes, general expressions,
+indexed repeat references, XTCE, and SCOS import are future milestones.

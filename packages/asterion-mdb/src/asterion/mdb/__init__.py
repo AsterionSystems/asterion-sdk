@@ -22,9 +22,13 @@ from .errors import (
     NoMatchingContainerError,
     ReferenceResolutionError,
     StructureLimitError,
+    TimeArithmeticError,
+    TimeDecodeError,
     ValidityEvaluationError,
 )
 from .model import (
+    AbsoluteTimeParameterType,
+    AbsoluteTimeValue,
     AggregateMember,
     AggregateMemberValue,
     AggregateParameterType,
@@ -58,6 +62,8 @@ from .model import (
     PolynomialCalibrator,
     QualifiedName,
     RawValue,
+    RelativeTimeParameterType,
+    RelativeTimeValue,
     RepeatedEntryValue,
     RepeatEntry,
     RuntimeRawValue,
@@ -68,11 +74,15 @@ from .model import (
     SpaceSystem,
     StringEncoding,
     StringParameterType,
+    TimeEpochDefinition,
+    TimeScale,
 )
 
 __all__ = [
     "DEFAULT_MAX_DECODED_VALUES",
     "DEFAULT_MAX_STRUCTURE_DEPTH",
+    "AbsoluteTimeParameterType",
+    "AbsoluteTimeValue",
     "AggregateMember",
     "AggregateMemberValue",
     "AggregateParameterType",
@@ -122,6 +132,8 @@ __all__ = [
     "QualifiedName",
     "RawValue",
     "ReferenceResolutionError",
+    "RelativeTimeParameterType",
+    "RelativeTimeValue",
     "RepeatEntry",
     "RepeatedEntryValue",
     "RuntimeRawValue",
@@ -133,5 +145,9 @@ __all__ = [
     "StringEncoding",
     "StringParameterType",
     "StructureLimitError",
+    "TimeArithmeticError",
+    "TimeDecodeError",
+    "TimeEpochDefinition",
+    "TimeScale",
     "ValidityEvaluationError",
 ]

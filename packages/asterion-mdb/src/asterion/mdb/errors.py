@@ -59,6 +59,14 @@ class StructureLimitError(MdbDecodeError):
     """Raised when structured decoding exceeds a configured resource limit."""
 
 
+class TimeDecodeError(MdbDecodeError):
+    """Raised when an encoded time value cannot be decoded safely."""
+
+
+class TimeArithmeticError(MdbError, ValueError):
+    """Raised when time values cannot participate in the requested operation."""
+
+
 class ContainerSelectionError(MdbDecodeError):
     """Base exception for derived-container selection failures."""
 

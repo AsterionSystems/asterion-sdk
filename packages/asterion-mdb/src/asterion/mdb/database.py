@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from decimal import Decimal, DecimalException
 from math import isfinite
 from types import MappingProxyType
 
@@ -19,9 +21,12 @@ from .errors import (
     NoMatchingContainerError,
     ReferenceResolutionError,
     StructureLimitError,
+    TimeDecodeError,
     ValidityEvaluationError,
 )
 from .model import (
+    AbsoluteTimeParameterType,
+    AbsoluteTimeValue,
     AggregateMember,
     AggregateMemberValue,
     AggregateParameterType,
@@ -53,6 +58,8 @@ from .model import (
     ParameterValue,
     PolynomialCalibrator,
     QualifiedName,
+    RelativeTimeParameterType,
+    RelativeTimeValue,
     RepeatedEntryValue,
     RepeatEntry,
     RuntimeRawValue,
@@ -61,6 +68,8 @@ from .model import (
     SpaceSystem,
     StringEncoding,
     StringParameterType,
+    TimeEpochDefinition,
+    TimeScale,
 )
 
 DEFAULT_MAX_STRUCTURE_DEPTH = 32
@@ -121,6 +130,7 @@ class MissionDatabaseBuilder:
             max_decoded_values, "max_decoded_values"
         )
         self._systems: dict[QualifiedName, SpaceSystem] = {}
+        self._epochs: dict[QualifiedName, TimeEpochDefinition] = {}
         self._types: dict[QualifiedName, ParameterType] = {}
         self._parameters: dict[QualifiedName, ParameterDefinition] = {}
         self._containers: dict[QualifiedName, SequenceContainer] = {}
@@ -148,12 +158,19 @@ class MissionDatabaseBuilder:
                 StringParameterType,
                 ArrayParameterType,
                 AggregateParameterType,
+                AbsoluteTimeParameterType,
+                RelativeTimeParameterType,
             ),
         ):
             raise MdbValidationError("parameter type is not supported")
         self._add_unique(
             self._types, parameter_type.name, parameter_type, "parameter type"
         )
+
+    def add_time_epoch(self, epoch: TimeEpochDefinition) -> None:
+        if not isinstance(epoch, TimeEpochDefinition):
+            raise MdbValidationError("time epoch must be a TimeEpochDefinition")
+        self._add_unique(self._epochs, epoch.name, epoch, "time epoch")
 
     def add_parameter(self, parameter: ParameterDefinition) -> None:
         if not isinstance(parameter, ParameterDefinition):
@@ -167,13 +184,17 @@ class MissionDatabaseBuilder:
 
     def compile(self) -> MissionDatabase:
         self._validate_systems()
+        epochs = {
+            name: self._validate_epoch(value) for name, value in self._epochs.items()
+        }
         types = {
             name: self._validate_type(value) for name, value in self._types.items()
         }
         parameters, aliases = self._resolve_parameters(types)
-        types = self._resolve_type_evaluation(types, parameters)
+        types = self._resolve_type_evaluation(types, parameters, epochs)
         self._validate_type_cycles(types)
         containers = self._resolve_containers(parameters)
+        self._validate_time_references(types, parameters, containers)
         self._validate_container_cycles(containers)
         derived: dict[QualifiedName, list[QualifiedName]] = {}
         for container in containers.values():
@@ -183,6 +204,7 @@ class MissionDatabaseBuilder:
         return MissionDatabase(
             name=self.name,
             systems=MappingProxyType(dict(self._systems)),
+            time_epochs=MappingProxyType(epochs),
             parameter_types=MappingProxyType(types),
             parameters=MappingProxyType(parameters),
             aliases=MappingProxyType(aliases),
@@ -213,12 +235,29 @@ class MissionDatabaseBuilder:
                 raise MdbValidationError(
                     f"space system {name} has missing parent {name.parent}"
                 )
-        for definitions in (self._types, self._parameters, self._containers):
+        for definitions in (
+            self._epochs,
+            self._types,
+            self._parameters,
+            self._containers,
+        ):
             for name in definitions:
                 if _owner(name) not in self._systems:
                     raise MdbValidationError(
                         f"definition {name} belongs to unknown space system {_owner(name)}"
                     )
+
+    @staticmethod
+    def _validate_epoch(value: TimeEpochDefinition) -> TimeEpochDefinition:
+        if not isinstance(value.origin, datetime) or value.origin.tzinfo is None:
+            raise MdbValidationError(
+                f"{value.name} epoch origin must be timezone-aware"
+            )
+        if value.origin.utcoffset() != timedelta(0):
+            raise MdbValidationError(f"{value.name} epoch origin must use zero offset")
+        if not isinstance(value.time_scale, TimeScale):
+            raise MdbValidationError(f"{value.name} time scale is invalid")
+        return value
 
     @staticmethod
     def _validate_type(value: ParameterType) -> ParameterType:
@@ -282,9 +321,26 @@ class MissionDatabaseBuilder:
                 raise MdbValidationError(
                     f"{value.name} has duplicate aggregate member names"
                 )
+        elif isinstance(value, (AbsoluteTimeParameterType, RelativeTimeParameterType)):
+            MissionDatabaseBuilder._validate_time_type(value)
         if isinstance(value, (IntegerParameterType, FloatParameterType)):
             MissionDatabaseBuilder._validate_numeric_evaluation(value)
         return value
+
+    @staticmethod
+    def _validate_time_type(
+        value: AbsoluteTimeParameterType | RelativeTimeParameterType,
+    ) -> None:
+        for field_name, field_value in (
+            ("seconds_per_unit", value.seconds_per_unit),
+            ("offset_seconds", value.offset_seconds),
+        ):
+            if not isinstance(field_value, Decimal) or not field_value.is_finite():
+                raise MdbValidationError(
+                    f"{value.name} {field_name} must be a finite Decimal"
+                )
+        if value.seconds_per_unit <= 0:
+            raise MdbValidationError(f"{value.name} seconds_per_unit must be positive")
 
     @staticmethod
     def _validate_count(value: int | DynamicDimension, label: str) -> None:
@@ -416,6 +472,7 @@ class MissionDatabaseBuilder:
         self,
         types: Mapping[QualifiedName, ParameterType],
         parameters: Mapping[QualifiedName, ParameterDefinition],
+        epochs: Mapping[QualifiedName, TimeEpochDefinition],
     ) -> dict[QualifiedName, ParameterType]:
         resolved: dict[QualifiedName, ParameterType] = {}
         for name, parameter_type in types.items():
@@ -470,6 +527,28 @@ class MissionDatabaseBuilder:
                     )
                     for member in parameter_type.members
                 )
+            elif isinstance(
+                parameter_type,
+                (AbsoluteTimeParameterType, RelativeTimeParameterType),
+            ):
+                encoding_name = _resolve_reference(
+                    parameter_type.encoding_type_ref,
+                    owner=owner,
+                    definitions=types,
+                )
+                if not isinstance(
+                    types[encoding_name], (IntegerParameterType, FloatParameterType)
+                ):
+                    raise MdbValidationError(
+                        f"{parameter_type.name} time encoding must be integer or float"
+                    )
+                changes["encoding_type_ref"] = encoding_name
+                if isinstance(parameter_type, AbsoluteTimeParameterType):
+                    changes["epoch_ref"] = _resolve_reference(
+                        parameter_type.epoch_ref,
+                        owner=owner,
+                        definitions=epochs,
+                    )
             resolved[name] = replace(parameter_type, **changes)
         return resolved
 
@@ -523,6 +602,55 @@ class MissionDatabaseBuilder:
 
         for name in types:
             visit(name, (), 0)
+
+    @staticmethod
+    def _validate_time_references(
+        types: Mapping[QualifiedName, ParameterType],
+        parameters: Mapping[QualifiedName, ParameterDefinition],
+        containers: Mapping[QualifiedName, SequenceContainer],
+    ) -> None:
+        time_parameters = {
+            parameter.name
+            for parameter in parameters.values()
+            if isinstance(
+                types[QualifiedName.parse(parameter.type_ref)],
+                (AbsoluteTimeParameterType, RelativeTimeParameterType),
+            )
+        }
+
+        def check_comparisons(comparisons: tuple[Comparison, ...]) -> None:
+            for comparison in comparisons:
+                if isinstance(comparison.left, ParameterReference) and (
+                    QualifiedName.parse(comparison.left.reference) in time_parameters
+                ):
+                    raise MdbValidationError(
+                        "time parameters cannot participate in comparisons"
+                    )
+
+        def check_dimension(dimension: int | DynamicDimension) -> None:
+            if (
+                isinstance(dimension, DynamicDimension)
+                and isinstance(dimension.source, ParameterReference)
+                and QualifiedName.parse(dimension.source.reference) in time_parameters
+            ):
+                raise MdbValidationError(
+                    "time parameters cannot drive dynamic dimensions"
+                )
+
+        for parameter_type in types.values():
+            check_comparisons(parameter_type.validity_criteria)
+            if isinstance(parameter_type, (IntegerParameterType, FloatParameterType)):
+                for contextual in parameter_type.contextual_calibrators:
+                    check_comparisons(contextual.criteria)
+            if isinstance(parameter_type, (BinaryParameterType, StringParameterType)):
+                check_dimension(parameter_type.size_bits)
+            elif isinstance(parameter_type, ArrayParameterType):
+                check_dimension(parameter_type.element_count)
+        for container in containers.values():
+            check_comparisons(container.restrictions)
+            for entry in container.entries:
+                if isinstance(entry, RepeatEntry):
+                    check_dimension(entry.count)
 
     @staticmethod
     def _resolve_comparisons(
@@ -680,6 +808,7 @@ class MissionDatabase:
 
     name: str
     systems: MappingProxyType[QualifiedName, SpaceSystem]
+    time_epochs: MappingProxyType[QualifiedName, TimeEpochDefinition]
     parameter_types: MappingProxyType[QualifiedName, ParameterType]
     parameters: MappingProxyType[QualifiedName, ParameterDefinition]
     aliases: MappingProxyType[str, QualifiedName]
@@ -687,6 +816,13 @@ class MissionDatabase:
     derived_containers: MappingProxyType[QualifiedName, tuple[QualifiedName, ...]]
     max_structure_depth: int
     max_decoded_values: int
+
+    def time_epoch(self, reference: str | QualifiedName) -> TimeEpochDefinition:
+        """Look up an epoch by absolute qualified name."""
+        name = QualifiedName.parse(reference)
+        if name not in self.time_epochs:
+            raise ReferenceResolutionError(f"unknown time epoch: {name}")
+        return self.time_epochs[name]
 
     def parameter(self, reference: str | QualifiedName) -> ParameterDefinition:
         """Look up a parameter by absolute name or alias."""
@@ -867,6 +1003,32 @@ class MissionDatabase:
             raise StructureLimitError(
                 f"structured value exceeds depth {self.max_structure_depth}"
             )
+        if isinstance(
+            parameter_type, (AbsoluteTimeParameterType, RelativeTimeParameterType)
+        ):
+            encoding_type = self.parameter_types[
+                QualifiedName.parse(parameter_type.encoding_type_ref)
+            ]
+            if not isinstance(
+                encoding_type, (IntegerParameterType, FloatParameterType)
+            ):
+                raise TimeDecodeError("compiled time encoding is not numeric")
+            encoded, cursor = self._decode_type(
+                data,
+                cursor,
+                parameter,
+                encoding_type,
+                values,
+                context,
+                depth=depth,
+                budget=budget,
+            )
+            return (
+                self._wrap_time_value(
+                    encoded, parameter_type, values=values, context=context
+                ),
+                cursor,
+            )
         if isinstance(parameter_type, ArrayParameterType):
             count = self._resolve_dimension_value(
                 parameter_type.element_count, values=values, context=context
@@ -997,6 +1159,53 @@ class MissionDatabase:
             parameter_type=concrete_type,
         )
         return self._evaluate_parameter(decoded, concrete_type, values, context), cursor
+
+    def _wrap_time_value(
+        self,
+        encoded: ParameterValue,
+        parameter_type: AbsoluteTimeParameterType | RelativeTimeParameterType,
+        *,
+        values: Mapping[QualifiedName, ParameterValue],
+        context: Mapping[str, Scalar],
+    ) -> ParameterValue:
+        numeric = encoded.value
+        if isinstance(numeric, bool) or not isinstance(numeric, (int, float)):
+            raise TimeDecodeError("time encoding must produce a numeric value")
+        if isinstance(numeric, float) and not isfinite(numeric):
+            raise TimeDecodeError("time encoding must produce a finite value")
+        try:
+            decimal_value = (
+                Decimal(numeric) if isinstance(numeric, int) else Decimal(str(numeric))
+            )
+            seconds = (
+                decimal_value * parameter_type.seconds_per_unit
+                + parameter_type.offset_seconds
+            )
+        except (DecimalException, ValueError) as error:
+            raise TimeDecodeError(f"cannot convert encoded time: {error}") from error
+        if not seconds.is_finite():
+            raise TimeDecodeError("decoded time must be finite")
+        try:
+            wrapper_valid = self._matches_comparisons(
+                parameter_type.validity_criteria, values, context
+            )
+        except MdbDecodeError as error:
+            raise ValidityEvaluationError(
+                f"cannot evaluate validity for {encoded.parameter.name}: {error}"
+            ) from error
+        if isinstance(parameter_type, AbsoluteTimeParameterType):
+            epoch = self.time_epochs[QualifiedName.parse(parameter_type.epoch_ref)]
+            value = AbsoluteTimeValue(epoch, seconds)
+        else:
+            value = RelativeTimeValue(seconds)
+        return ParameterValue(
+            encoded.parameter,
+            encoded.raw_value,
+            value,
+            "s",
+            encoded.is_valid and wrapper_valid,
+            None,
+        )
 
     @classmethod
     def _evaluate_structured(

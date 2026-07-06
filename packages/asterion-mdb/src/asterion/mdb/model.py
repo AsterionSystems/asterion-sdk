@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from decimal import ROUND_HALF_EVEN, Decimal, DecimalException
 from enum import IntEnum, StrEnum
 from types import MappingProxyType
 
-from .errors import MdbValidationError
+from .errors import MdbValidationError, TimeArithmeticError
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -48,6 +50,13 @@ class ByteOrder(StrEnum):
 class StringEncoding(StrEnum):
     ASCII = "ascii"
     UTF8 = "utf-8"
+
+
+class TimeScale(StrEnum):
+    UTC = "UTC"
+    TAI = "TAI"
+    GPS = "GPS"
+    TT = "TT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +129,14 @@ class DynamicDimension:
     maximum: int
     multiplier: int = 1
     offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TimeEpochDefinition:
+    name: QualifiedName
+    origin: datetime
+    time_scale: TimeScale
+    description: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +220,25 @@ class AggregateParameterType:
     validity_criteria: tuple[Comparison, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class AbsoluteTimeParameterType:
+    name: QualifiedName
+    encoding_type_ref: str | QualifiedName
+    epoch_ref: str | QualifiedName
+    seconds_per_unit: Decimal = Decimal("1")
+    offset_seconds: Decimal = Decimal("0")
+    validity_criteria: tuple[Comparison, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RelativeTimeParameterType:
+    name: QualifiedName
+    encoding_type_ref: str | QualifiedName
+    seconds_per_unit: Decimal = Decimal("1")
+    offset_seconds: Decimal = Decimal("0")
+    validity_criteria: tuple[Comparison, ...] = ()
+
+
 type ScalarParameterType = (
     IntegerParameterType
     | FloatParameterType
@@ -212,7 +248,13 @@ type ScalarParameterType = (
     | StringParameterType
 )
 
-type ParameterType = ScalarParameterType | ArrayParameterType | AggregateParameterType
+type ParameterType = (
+    ScalarParameterType
+    | ArrayParameterType
+    | AggregateParameterType
+    | AbsoluteTimeParameterType
+    | RelativeTimeParameterType
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +378,82 @@ class AggregateValue:
         return self.by_name[name]
 
 
-type RuntimeValue = EngineeringValue | ArrayValue | AggregateValue
+@dataclass(frozen=True, slots=True)
+class RelativeTimeValue:
+    seconds: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.seconds, Decimal) or not self.seconds.is_finite():
+            raise TimeArithmeticError("relative time seconds must be a finite Decimal")
+
+    def __add__(self, other: RelativeTimeValue) -> RelativeTimeValue:
+        if not isinstance(other, RelativeTimeValue):
+            return NotImplemented
+        return RelativeTimeValue(self.seconds + other.seconds)
+
+    def __sub__(self, other: RelativeTimeValue) -> RelativeTimeValue:
+        if not isinstance(other, RelativeTimeValue):
+            return NotImplemented
+        return RelativeTimeValue(self.seconds - other.seconds)
+
+
+@dataclass(frozen=True, slots=True)
+class AbsoluteTimeValue:
+    epoch: TimeEpochDefinition
+    elapsed_seconds: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.epoch, TimeEpochDefinition):
+            raise TimeArithmeticError("absolute time epoch is invalid")
+        if (
+            not isinstance(self.elapsed_seconds, Decimal)
+            or not self.elapsed_seconds.is_finite()
+        ):
+            raise TimeArithmeticError(
+                "absolute elapsed seconds must be a finite Decimal"
+            )
+
+    def __add__(self, other: RelativeTimeValue) -> AbsoluteTimeValue:
+        if not isinstance(other, RelativeTimeValue):
+            return NotImplemented
+        return AbsoluteTimeValue(self.epoch, self.elapsed_seconds + other.seconds)
+
+    def __sub__(
+        self, other: AbsoluteTimeValue | RelativeTimeValue
+    ) -> RelativeTimeValue | AbsoluteTimeValue:
+        if isinstance(other, RelativeTimeValue):
+            return AbsoluteTimeValue(self.epoch, self.elapsed_seconds - other.seconds)
+        if not isinstance(other, AbsoluteTimeValue):
+            return NotImplemented
+        if self.epoch != other.epoch:
+            raise TimeArithmeticError(
+                "absolute times must use the same epoch and time scale"
+            )
+        return RelativeTimeValue(self.elapsed_seconds - other.elapsed_seconds)
+
+    def to_datetime(self) -> datetime:
+        if self.epoch.time_scale is not TimeScale.UTC:
+            raise TimeArithmeticError("datetime conversion is supported only for UTC")
+        try:
+            microseconds = int(
+                (self.elapsed_seconds * Decimal(1_000_000)).quantize(
+                    Decimal(1), rounding=ROUND_HALF_EVEN
+                )
+            )
+            return self.epoch.origin + timedelta(microseconds=microseconds)
+        except (DecimalException, OverflowError, ValueError) as error:
+            raise TimeArithmeticError(
+                f"datetime conversion is out of range: {error}"
+            ) from error
+
+
+type RuntimeValue = (
+    EngineeringValue
+    | ArrayValue
+    | AggregateValue
+    | AbsoluteTimeValue
+    | RelativeTimeValue
+)
 type RuntimeRawValue = RawValue | tuple["RuntimeRawValue", ...]
 
 
