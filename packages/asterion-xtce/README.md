@@ -18,8 +18,16 @@ entity declarations are rejected, and loading never performs network access.
 Recognized XTCE telemetry semantics that cannot be mapped safely raise
 `UnsupportedXtceFeatureError`; no partial database is returned.
 
-The initial subset covers nested space systems, scalar telemetry types,
+The supported subset covers nested space systems, scalar telemetry types,
 parameters, simple units and aliases, polynomial calibration, static alarms,
-numeric time types, sequence containers, inheritance, entries, and comparison
-restrictions. Commands, arrays, aggregates, dynamic values, indirect entries,
-advanced calibrators, and XML export are not yet supported.
+numeric time types, sequence containers, inheritance, entries, comparison
+restrictions, arrays, aggregates, dynamic binary/string sizes, repeat entries,
+and contextual polynomial calibrators.
+
+Multidimensional arrays become nested MDB arrays and must use zero-based indices.
+XTCE dynamic values preserve `useCalibratedValue` and receive explicit safety
+bounds from `XtceLoadOptions`: 65,536 elements, 65,536 repeats, and 67,108,864
+bits by default. These limits are independently configurable.
+
+Commands, indirect entries, arbitrary expressions, spline calibrators, advanced
+repeat semantics, nonzero array indices, and XML export are not yet supported.

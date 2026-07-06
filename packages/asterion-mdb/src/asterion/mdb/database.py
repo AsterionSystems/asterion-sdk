@@ -368,6 +368,8 @@ class MissionDatabaseBuilder:
                 raise MdbValidationError(f"{label} {field_name} must be an integer")
         if value.maximum < 1:
             raise MdbValidationError(f"{label} maximum must be positive")
+        if not isinstance(value.use_raw_value, bool):
+            raise MdbValidationError(f"{label} use_raw_value must be boolean")
 
     @staticmethod
     def _validate_numeric_evaluation(
@@ -1245,13 +1247,19 @@ class MissionDatabase:
                 raise DynamicDimensionError(
                     f"dimension source parameter {name} has not been decoded"
                 )
-            source: object = values[name].value
+            source: object = (
+                values[name].raw_value
+                if dimension.use_raw_value
+                else values[name].value
+            )
         else:
             if dimension.source.name not in context:
                 raise DynamicDimensionError(
                     f"missing dimension context {dimension.source.name!r}"
                 )
             source = context[dimension.source.name]
+        if isinstance(source, float) and isfinite(source) and source.is_integer():
+            source = int(source)
         if isinstance(source, bool) or not isinstance(source, int):
             raise DynamicDimensionError("dimension source must be an integer")
         result = source * dimension.multiplier + dimension.offset

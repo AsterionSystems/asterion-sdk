@@ -84,6 +84,10 @@ limits structured nesting and the total scalar values decoded per call. These
 limits are configurable on `MissionDatabaseBuilder` and default to 32 levels
 and 100,000 scalar values.
 
+Dimensions use the engineering value by default. Set `use_raw_value=True` when
+the wire layout is driven by the uncalibrated integer. Finite integral calibrated
+floats are normalized to integers; fractional values remain invalid dimensions.
+
 `RepeatEntry` decodes bounded rows of arbitrary parameter entries. Repeated rows
 are available through `DecodedContainer.repeated_entries` and
 `repeats_by_name`; they are deliberately excluded from scalar `by_name` lookup

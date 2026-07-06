@@ -372,6 +372,58 @@ def test_parameter_dimension_must_be_decoded_first() -> None:
         target.compile().decode(b"\x01", root_container="/Satellite/root")
 
 
+def test_dynamic_dimension_can_select_raw_or_engineering_value() -> None:
+    target = builder()
+    target.add_parameter_type(
+        IntegerParameterType(
+            qname("/Satellite/count_t"),
+            8,
+            calibrator=PolynomialCalibrator((0.0, 2.0)),
+        )
+    )
+    target.add_parameter_type(IntegerParameterType(qname("/Satellite/u8"), 8))
+    target.add_parameter_type(
+        ArrayParameterType(
+            qname("/Satellite/raw_array_t"),
+            "u8",
+            DynamicDimension(
+                ParameterReference("count"), maximum=4, use_raw_value=True
+            ),
+        )
+    )
+    target.add_parameter_type(
+        ArrayParameterType(
+            qname("/Satellite/engineering_array_t"),
+            "u8",
+            DynamicDimension(ParameterReference("count"), maximum=4),
+        )
+    )
+    add_parameter(target, "count", "count_t")
+    add_parameter(target, "raw", "raw_array_t")
+    add_parameter(target, "engineering", "engineering_array_t")
+    target.add_container(
+        SequenceContainer(
+            qname("/Satellite/root"),
+            (
+                ParameterEntry("count"),
+                ParameterEntry("raw"),
+                ParameterEntry("engineering"),
+            ),
+        )
+    )
+
+    result = target.compile().decode(
+        b"\x02\x01\x02\x03\x04\x05\x06", root_container="/Satellite/root"
+    )
+
+    raw = result.parameters[1].value
+    engineering = result.parameters[2].value
+    assert isinstance(raw, ArrayValue)
+    assert isinstance(engineering, ArrayValue)
+    assert len(raw) == 2
+    assert len(engineering) == 4
+
+
 def test_dynamic_octet_data_requires_byte_alignment() -> None:
     target = builder()
     target.add_parameter_type(
@@ -498,6 +550,11 @@ def test_invalid_database_limits(kwargs: dict[str, int]) -> None:
     [
         DynamicDimension(ContextReference("count"), 0),
         DynamicDimension(ContextReference("count"), 4, multiplier=True),
+        DynamicDimension(
+            ContextReference("count"),
+            4,
+            use_raw_value=1,  # type: ignore[arg-type]
+        ),
     ],
 )
 def test_invalid_dynamic_dimension_definitions(

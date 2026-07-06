@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -12,12 +12,18 @@ from typing import Final, Never
 
 from asterion.mdb import (
     AbsoluteTimeParameterType,
+    AggregateMember,
+    AggregateParameterType,
     AlarmSeverity,
+    ArrayParameterType,
     BinaryParameterType,
     BooleanParameterType,
     ByteOrder,
     Comparison,
     ComparisonOperator,
+    ContextCalibrator,
+    DynamicDimension,
+    EntryPosition,
     EnumeratedParameterType,
     EnumerationAlarm,
     FloatParameterType,
@@ -32,6 +38,7 @@ from asterion.mdb import (
     PolynomialCalibrator,
     QualifiedName,
     RelativeTimeParameterType,
+    RepeatEntry,
     SequenceContainer,
     SpaceSystem,
     StringEncoding,
@@ -60,12 +67,18 @@ class XtceLoadOptions:
     max_document_bytes: int = 16 * 1024 * 1024
     max_elements: int = 250_000
     max_depth: int = 128
+    max_dynamic_elements: int = 65_536
+    max_repeat_count: int = 65_536
+    max_dynamic_size_bits: int = 67_108_864
 
     def __post_init__(self) -> None:
         for name, value in (
             ("max_document_bytes", self.max_document_bytes),
             ("max_elements", self.max_elements),
             ("max_depth", self.max_depth),
+            ("max_dynamic_elements", self.max_dynamic_elements),
+            ("max_repeat_count", self.max_repeat_count),
+            ("max_dynamic_size_bits", self.max_dynamic_size_bits),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -104,7 +117,7 @@ def loads(
     limits = options or XtceLoadOptions()
     raw = _normalize_xml(data, source_name=source_name)
     root, namespace = _parse_xml(raw, source_name=source_name, options=limits)
-    mapper = _Mapper(namespace=namespace, source_name=source_name)
+    mapper = _Mapper(namespace=namespace, source_name=source_name, options=limits)
     return mapper.map(root)
 
 
@@ -181,9 +194,12 @@ def _split_tag(tag: str) -> tuple[str, str]:
 
 
 class _Mapper:
-    def __init__(self, *, namespace: str, source_name: str) -> None:
+    def __init__(
+        self, *, namespace: str, source_name: str, options: XtceLoadOptions
+    ) -> None:
         self.namespace = namespace
         self.source_name = source_name
+        self.options = options
         self.builder: MissionDatabaseBuilder | None = None
 
     def map(self, root: ET.Element) -> MissionDatabase:
@@ -193,7 +209,11 @@ class _Mapper:
             self._add_systems(root, parent=None, path="/SpaceSystem")
             self._map_system(root, parent=None, path="/SpaceSystem")
             return self.builder.compile()
-        except (XtceMappingError, UnsupportedXtceFeatureError):
+        except (
+            XtceMappingError,
+            UnsupportedXtceFeatureError,
+            XtceResourceLimitError,
+        ):
             raise
         except MdbError as error:
             raise XtceMappingError(
@@ -295,6 +315,7 @@ class _Mapper:
                     byte_order=order,
                     unit=unit,
                     calibrator=self._calibrator(encoding, path),
+                    contextual_calibrators=self._contextual_calibrators(encoding, path),
                     alarm_ranges=self._numeric_alarms(element, path),
                 )
             )
@@ -308,6 +329,7 @@ class _Mapper:
                     byte_order=self._byte_order(encoding, path),
                     unit=unit,
                     calibrator=self._calibrator(encoding, path),
+                    contextual_calibrators=self._contextual_calibrators(encoding, path),
                     alarm_ranges=self._numeric_alarms(element, path),
                 )
             )
@@ -344,7 +366,7 @@ class _Mapper:
                 else "StringDataEncoding"
             )
             encoding = self._required_child(element, encoding_name, path)
-            size = self._fixed_size(encoding, path)
+            size = self._encoded_size(encoding, path)
             if kind == "BinaryParameterType":
                 self._builder.add_parameter_type(BinaryParameterType(qualified, size))
             else:
@@ -359,10 +381,79 @@ class _Mapper:
                 self._builder.add_parameter_type(
                     StringParameterType(qualified, size, string_encoding)
                 )
+        elif kind == "ArrayParameterType":
+            self._map_array_type(element, owner=owner, name=name, path=path)
+        elif kind == "AggregateParameterType":
+            member_list = self._required_child(element, "MemberList", path)
+            members = tuple(
+                AggregateMember(
+                    self._required_attr(member, "name", path),
+                    self._required_attr(member, "typeRef", path),
+                )
+                for member in self._children(member_list, "Member")
+            )
+            self._builder.add_parameter_type(AggregateParameterType(qualified, members))
         elif kind in {"AbsoluteTimeParameterType", "RelativeTimeParameterType"}:
             self._map_time_type(element, owner=owner, name=name, kind=kind, path=path)
         else:
             self._unsupported(kind, path)
+
+    def _map_array_type(
+        self, element: ET.Element, *, owner: QualifiedName, name: str, path: str
+    ) -> None:
+        element_ref = self._required_attr(element, "arrayTypeRef", path)
+        dimension_list = self._required_child(element, "DimensionList", path)
+        dimensions = self._children(dimension_list, "Dimension")
+        if not dimensions:
+            raise XtceMappingError(
+                "array type requires at least one dimension",
+                source_name=self.source_name,
+                element_path=path,
+            )
+        counts = tuple(self._array_dimension(item, path) for item in dimensions)
+        current_ref: str | QualifiedName = element_ref
+        for index in range(len(counts) - 1, -1, -1):
+            type_name = (
+                owner.child(name)
+                if index == 0
+                else owner.child(f"__xtce_{name}_dimension_{index}")
+            )
+            self._builder.add_parameter_type(
+                ArrayParameterType(type_name, current_ref, counts[index])
+            )
+            current_ref = type_name
+
+    def _array_dimension(
+        self, element: ET.Element, path: str
+    ) -> int | DynamicDimension:
+        starting = self._child(element, "StartingIndex")
+        if starting is not None:
+            start = self._dimension_value(
+                starting, maximum=self.options.max_dynamic_elements, path=path
+            )
+            if not isinstance(start, int) or start != 0:
+                self._unsupported("nonzero or dynamic array starting index", path)
+        size = self._child(element, "Size")
+        if size is not None:
+            return self._dimension_value(
+                size, maximum=self.options.max_dynamic_elements, path=path
+            )
+        ending = self._required_child(element, "EndingIndex", path)
+        value = self._dimension_value(
+            ending, maximum=self.options.max_dynamic_elements, path=path
+        )
+        if isinstance(value, int):
+            count = value + 1
+            if count > self.options.max_dynamic_elements:
+                raise XtceResourceLimitError(
+                    f"array element count {count} exceeds configured maximum",
+                    source_name=self.source_name,
+                    element_path=path,
+                )
+            return count
+        return replace(
+            value, maximum=self.options.max_dynamic_elements, offset=value.offset + 1
+        )
 
     def _map_time_type(
         self,
@@ -441,32 +532,18 @@ class _Mapper:
         self, element: ET.Element, *, owner: QualifiedName, path: str
     ) -> None:
         name = self._required_attr(element, "name", path)
-        entries: list[ParameterEntry] = []
+        entries: list[ParameterEntry | RepeatEntry] = []
         entry_list = self._child(element, "EntryList")
         if entry_list is not None:
             for index, entry in enumerate(list(entry_list), 1):
                 _, kind = _split_tag(entry.tag)
                 entry_path = f"{path}/EntryList/*[{index}]"
-                if kind != "ParameterRefEntry":
-                    self._unsupported(kind, entry_path)
-                parameter_ref = self._required_attr(entry, "parameterRef", entry_path)
-                location = self._child(entry, "LocationInContainerInBits")
-                if location is None:
-                    entries.append(ParameterEntry(parameter_ref))
-                    continue
-                fixed = self._required_child(location, "FixedValue", entry_path)
-                offset = self._element_int(fixed, entry_path)
-                reference = location.get("referenceLocation", "previousEntry")
-                if reference == "containerStart":
-                    from asterion.mdb import EntryPosition
-
-                    entries.append(
-                        ParameterEntry(parameter_ref, EntryPosition.ABSOLUTE, offset)
-                    )
-                elif reference == "previousEntry" and offset == 0:
-                    entries.append(ParameterEntry(parameter_ref))
+                if kind == "ParameterRefEntry":
+                    entries.append(self._map_parameter_entry(entry, entry_path))
+                elif kind == "RepeatEntry":
+                    entries.append(self._map_repeat_entry(entry, index, entry_path))
                 else:
-                    self._unsupported("relative entry offsets", entry_path)
+                    self._unsupported(kind, entry_path)
         base_ref = None
         restrictions: tuple[Comparison, ...] = ()
         base = self._child(element, "BaseContainer")
@@ -478,6 +555,38 @@ class _Mapper:
         self._builder.add_container(
             SequenceContainer(owner.child(name), tuple(entries), base_ref, restrictions)
         )
+
+    def _map_parameter_entry(self, entry: ET.Element, path: str) -> ParameterEntry:
+        parameter_ref = self._required_attr(entry, "parameterRef", path)
+        location = self._child(entry, "LocationInContainerInBits")
+        if location is None:
+            return ParameterEntry(parameter_ref)
+        fixed = self._required_child(location, "FixedValue", path)
+        offset = self._element_int(fixed, path)
+        reference = location.get("referenceLocation", "previousEntry")
+        if reference == "containerStart":
+            return ParameterEntry(parameter_ref, EntryPosition.ABSOLUTE, offset)
+        if reference == "previousEntry" and offset == 0:
+            return ParameterEntry(parameter_ref)
+        self._unsupported("relative entry offsets", path)
+
+    def _map_repeat_entry(
+        self, entry: ET.Element, index: int, path: str
+    ) -> RepeatEntry:
+        count_element = self._required_child(entry, "Count", path)
+        count = self._dimension_value(
+            count_element, maximum=self.options.max_repeat_count, path=path
+        )
+        entry_list = self._required_child(entry, "EntryList", path)
+        repeated: list[ParameterEntry] = []
+        for child_index, child in enumerate(list(entry_list), 1):
+            _, kind = _split_tag(child.tag)
+            child_path = f"{path}/EntryList/*[{child_index}]"
+            if kind != "ParameterRefEntry":
+                self._unsupported("nested or non-parameter repeat entry", child_path)
+            repeated.append(self._map_parameter_entry(child, child_path))
+        name = entry.get("name", f"repeat_{index}")
+        return RepeatEntry(name, tuple(repeated), count)
 
     def _comparisons(self, element: ET.Element, path: str) -> tuple[Comparison, ...]:
         result: list[Comparison] = []
@@ -532,7 +641,7 @@ class _Mapper:
             return ByteOrder.BIG_ENDIAN
         self._unsupported(f"byte order {value!r}", path)
 
-    def _fixed_size(self, element: ET.Element, path: str) -> int:
+    def _encoded_size(self, element: ET.Element, path: str) -> int | DynamicDimension:
         if "sizeInBits" in element.attrib:
             return self._required_int_attr(element, "sizeInBits", path)
         size = self._child(element, "SizeInBits")
@@ -542,10 +651,77 @@ class _Mapper:
                 source_name=self.source_name,
                 element_path=path,
             )
-        fixed = self._child(size, "FixedValue")
-        if fixed is None:
-            self._unsupported("dynamic encoded sizes", path)
-        return self._element_int(fixed, path)
+        return self._dimension_value(
+            size, maximum=self.options.max_dynamic_size_bits, path=path
+        )
+
+    def _dimension_value(
+        self, element: ET.Element, *, maximum: int, path: str
+    ) -> int | DynamicDimension:
+        _, local = _split_tag(element.tag)
+        fixed = element if local == "FixedValue" else self._child(element, "FixedValue")
+        if fixed is not None:
+            value = self._element_int(fixed, path)
+            if value < 0:
+                raise XtceMappingError(
+                    "dimension must not be negative",
+                    source_name=self.source_name,
+                    element_path=path,
+                )
+            if value > maximum:
+                raise XtceResourceLimitError(
+                    f"dimension {value} exceeds configured maximum {maximum}",
+                    source_name=self.source_name,
+                    element_path=path,
+                )
+            return value
+        dynamic = (
+            element if local == "DynamicValue" else self._child(element, "DynamicValue")
+        )
+        if dynamic is None:
+            self._unsupported("non-fixed/non-dynamic dimension", path)
+        reference = next(iter(self._descendants(dynamic, "ParameterInstanceRef")), None)
+        if reference is None:
+            self._unsupported("dimension without ParameterInstanceRef", path)
+        parameter_ref = self._required_attr(reference, "parameterRef", path)
+        calibrated_text = reference.get("useCalibratedValue", "true").lower()
+        if calibrated_text not in {"true", "false"}:
+            raise XtceMappingError(
+                "useCalibratedValue must be true or false",
+                source_name=self.source_name,
+                element_path=path,
+            )
+        multiplier = 1
+        offset = 0
+        adjustment = next(iter(self._descendants(dynamic, "LinearAdjustment")), None)
+        if adjustment is not None:
+            multiplier = self._integer_adjustment(adjustment, "slope", 1, path)
+            offset = self._integer_adjustment(adjustment, "intercept", 0, path)
+        return DynamicDimension(
+            ParameterReference(parameter_ref),
+            maximum,
+            multiplier,
+            offset,
+            use_raw_value=calibrated_text == "false",
+        )
+
+    def _integer_adjustment(
+        self, element: ET.Element, name: str, default: int, path: str
+    ) -> int:
+        value = element.get(name)
+        if value is None:
+            return default
+        try:
+            decimal_value = Decimal(value)
+        except InvalidOperation as error:
+            raise XtceMappingError(
+                f"linear adjustment {name} must be numeric",
+                source_name=self.source_name,
+                element_path=path,
+            ) from error
+        if decimal_value != decimal_value.to_integral_value():
+            self._unsupported("noninteger dynamic linear adjustment", path)
+        return int(decimal_value)
 
     def _calibrator(
         self, encoding: ET.Element, path: str
@@ -556,6 +732,9 @@ class _Mapper:
         polynomial = self._child(default, "PolynomialCalibrator")
         if polynomial is None:
             self._unsupported("non-polynomial calibrator", path)
+        return self._polynomial(polynomial, path)
+
+    def _polynomial(self, polynomial: ET.Element, path: str) -> PolynomialCalibrator:
         terms: dict[int, float] = {}
         for term in self._children(polynomial, "Term"):
             exponent = self._required_int_attr(term, "exponent", path)
@@ -570,6 +749,25 @@ class _Mapper:
         return PolynomialCalibrator(
             tuple(terms.get(power, 0.0) for power in range(max(terms) + 1))
         )
+
+    def _contextual_calibrators(
+        self, encoding: ET.Element, path: str
+    ) -> tuple[ContextCalibrator, ...]:
+        calibrator_list = self._child(encoding, "ContextCalibratorList")
+        if calibrator_list is None:
+            return ()
+        result: list[ContextCalibrator] = []
+        for item in self._children(calibrator_list, "ContextCalibrator"):
+            match = self._required_child(item, "ContextMatch", path)
+            criteria = self._comparisons(match, path)
+            calibrator = self._required_child(item, "Calibrator", path)
+            polynomial = self._child(calibrator, "PolynomialCalibrator")
+            if polynomial is None:
+                self._unsupported("non-polynomial contextual calibrator", path)
+            result.append(
+                ContextCalibrator(criteria, self._polynomial(polynomial, path))
+            )
+        return tuple(result)
 
     def _numeric_alarms(
         self, element: ET.Element, path: str

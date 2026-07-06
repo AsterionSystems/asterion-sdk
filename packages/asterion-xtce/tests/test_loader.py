@@ -198,6 +198,9 @@ def test_resource_limits() -> None:
         {"max_document_bytes": 0},
         {"max_elements": True},
         {"max_depth": 0},
+        {"max_dynamic_elements": 0},
+        {"max_repeat_count": True},
+        {"max_dynamic_size_bits": 0},
     ],
 )
 def test_invalid_options(kwargs: dict[str, int]) -> None:
@@ -205,19 +208,19 @@ def test_invalid_options(kwargs: dict[str, int]) -> None:
         XtceLoadOptions(**kwargs)
 
 
-def test_unsupported_recognized_construct_has_element_path() -> None:
+def test_incomplete_structured_construct_has_element_path() -> None:
     xml = f"""<SpaceSystem xmlns="{XTCE_1_3_NAMESPACE}" name="Satellite">
       <TelemetryMetaData><ParameterTypeSet>
         <ArrayParameterType name="array" arrayTypeRef="u8"/>
       </ParameterTypeSet></TelemetryMetaData>
     </SpaceSystem>"""
 
-    with pytest.raises(UnsupportedXtceFeatureError) as caught:
+    with pytest.raises(XtceMappingError) as caught:
         loads(xml, source_name="unsupported.xml")
 
     assert caught.value.source_name == "unsupported.xml"
     assert caught.value.element_path is not None
-    assert "ArrayParameterType" in str(caught.value)
+    assert "DimensionList" in str(caught.value)
 
 
 def test_unusable_inputs_and_files(tmp_path: Path) -> None:
@@ -312,7 +315,7 @@ def unsupported_type_document(body: str) -> str:
         ),
         (
             '<BinaryParameterType name="x"><BinaryDataEncoding><SizeInBits><DynamicValue/></SizeInBits></BinaryDataEncoding></BinaryParameterType>',
-            "dynamic encoded sizes",
+            "dimension without ParameterInstanceRef",
         ),
         (
             '<FloatParameterType name="x"><UnitSet><Unit>m</Unit><Unit>s</Unit></UnitSet><FloatDataEncoding sizeInBits="32"/></FloatParameterType>',

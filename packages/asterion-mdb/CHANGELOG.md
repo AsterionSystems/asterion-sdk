@@ -11,3 +11,4 @@
   and string sizes, and grouped repeated container entries.
 - Added named time epochs, numeric absolute and relative time types, exact
   Decimal runtime values, safe arithmetic, and explicit UTC datetime conversion.
+- Added explicit raw-versus-engineering selection for dynamic dimensions.

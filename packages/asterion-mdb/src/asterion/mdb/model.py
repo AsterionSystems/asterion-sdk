@@ -129,6 +129,7 @@ class DynamicDimension:
     maximum: int
     multiplier: int = 1
     offset: int = 0
+    use_raw_value: bool = False
 
 
 @dataclass(frozen=True, slots=True)
